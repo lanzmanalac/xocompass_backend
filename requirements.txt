@@ -1,0 +1,18 @@
+# XoCompass — pin numpy<2 for pmdarima / statsmodels wheels on macOS arm64 + Python 3.9
+numpy>=1.26.4,<2
+pandas>=2.0.0,<2.3
+scipy>=1.11.0,<1.14
+statsmodels>=0.14.0
+pmdarima>=2.0.4
+matplotlib>=3.8.0,<3.10
+seaborn>=0.13.0
+xarray>=2023.1.0
+xskillscore>=0.0.24
+requests>=2.28.0
+
+# API + persistence
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+sqlalchemy>=2.0.0
+joblib>=1.3.0

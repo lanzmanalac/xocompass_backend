@@ -1,0 +1,16 @@
+---
+description: Python style, typing, and dependency discipline
+globs: "**/*.py"
+alwaysApply: false
+---
+
+## Python coding standards
+- Follow PEP 8. Keep functions small and composable; avoid long procedural scripts when a module/service layer fits better.
+- Use type hints for function args + returns (and for public dataclasses/models where helpful).
+- Prefer standard library first; add third-party deps only when they materially improve correctness or maintainability.
+
+## Dependencies
+- If proposing a new package, explicitly call out:
+  - Why it’s needed
+  - The exact `requirements.txt` entry to add (pinned version)
+  - Any optional extras (e.g. `package[extra]==x.y.z`) only if required
