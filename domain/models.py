@@ -110,3 +110,6 @@ class ForecastCache(Base):
     predicted = Column(Float)
     lower_bound = Column(Float)
     upper_bound = Column(Float)
+
+    generated_at = Column(DateTime(timezone=True), default=get_ph_now)
+    periods_ahead = Column(Integer)
