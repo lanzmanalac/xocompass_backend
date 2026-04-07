@@ -1,6 +1,8 @@
 # Ignore all CSV files
 *.csv
 
+data/
+*.db
 # Environments
 .env
 .venv
@@ -48,3 +50,5 @@ build/
 
 # Agents
 agents.md
+
+CLAUDE.md
