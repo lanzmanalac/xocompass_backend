@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
+
+from services.ingestion_service import ingest_csv
 
 # ── IMPORT OUR NEW STRICT DATA CONTRACTS ──
 from api.schemas import (
@@ -105,3 +107,17 @@ def get_historical_ledger(db: Session = Depends(get_db)):
         ) for r in records
     ]
     return HistoricalDataResponse(data=points)
+
+@app.post("/api/upload")
+async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Page 3: Safely ingests KJS CSV data and prevents duplicate dates."""
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are allowed.")
+        
+    contents = await file.read()
+    try:
+        result = ingest_csv(contents, db)
+        return result
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
