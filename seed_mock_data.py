@@ -15,20 +15,50 @@ def seed_data():
 
     print("🌱 Seeding mock data for XoCompass...")
 
+    mock_diagnostic = ModelDiagnostic(
+        model_id=1,
+        residuals_json=[
+            {"fitted": v, "residual": round((v * 0.05) - 2.5, 2)}
+            for v in range(80, 200, 4)
+        ],
+        acf_values_json=[
+            round(0.9 * (0.85 ** i), 3) for i in range(13)
+        ],
+        pacf_values_json=[
+            round(0.9 * (0.6 ** i), 3) for i in range(13)
+        ],
+        # ADF
+        adf_stat=-4.23,
+        adf_pvalue=0.001,
+        adf_conclusion="Series is stationary after differencing.",
+        # Ljung-Box
+        ljungbox_stat=18.7,
+        ljungbox_pvalue=0.29,
+        ljungbox_conclusion="Residuals show no significant autocorrelation.",
+        # Jarque-Bera
+        jarquebera_stat=1.87,
+        jarquebera_pvalue=0.39,
+        jarquebera_conclusion="Residuals are approximately normal around zero.",
+    )
+
     # 1. Mock Model Registry (The Brain)
+    # Update SarimaxModel seed block
     mock_model = SarimaxModel(
-        model_name="Production_SARIMAX_MVP",
-        model_path="data/models/mock_model_v1.joblib",
+        model_name="XoCompass SARIMAX v1",
+        model_path="data/models/mock_sarimax.joblib",
         is_active=True,
         pipeline_ver="v10.1",
-        p=1, d=1, q=1,
-        seasonal_p=0, seasonal_d=1, seasonal_q=1,
-        exog_features_json=["is_holiday", "typhoon_msw"],
-        aic_score=1250.4, bic_score=1265.1,
-        mae=15.2, rmse=22.4, mape=0.08,
-        train_start_date=now_ph - timedelta(days=365),
-        train_end_date=now_ph - timedelta(days=7),
-        created_at=now_ph
+        p=2, d=1, q=2,
+        seasonal_p=1, seasonal_d=1, seasonal_q=1,
+        exog_features_json=["holiday_lead_2", "is_long_weekend"],
+        aic_score=204.3,
+        bic_score=218.1,
+        mae=9.8,
+        rmse=12.4,
+        mape=0.089,
+        wmape=0.01232,        # matches frontend's 4.2% display
+        train_start_date=datetime(2013, 1, 7, tzinfo=ZoneInfo("Asia/Manila")),
+        train_end_date=datetime(2025, 12, 29, tzinfo=ZoneInfo("Asia/Manila")),
     )
     db.add(mock_model)
     db.commit()

@@ -39,6 +39,7 @@ class SarimaxModel(Base):
     mae = Column(Float)
     rmse = Column(Float)
     mape = Column(Float)
+    wmape = Column(Float)
     
     # Training Dates
     train_start_date = Column(DateTime(timezone=True))
@@ -84,21 +85,29 @@ class ForecastSnapshot(Base):
 # 4. DIAGNOSTICS (Page 2 Technical Charts)
 class ModelDiagnostic(Base):
     __tablename__ = "model_diagnostics"
+
     id = Column(Integer, primary_key=True)
     model_id = Column(Integer, ForeignKey("sarimax_models.id"))
-    residuals_json = Column(JSON)   # For Residuals vs Fitted graph
-    acf_values_json = Column(JSON)  # For ACF graph
-    pacf_values_json = Column(JSON) # For PACF graph
-    
-    # Test Stats
+
+    residuals_json = Column(JSON)
+    acf_values_json = Column(JSON)
+    pacf_values_json = Column(JSON)
+
+    # ADF
     adf_stat = Column(Float)
     adf_pvalue = Column(Float)
+    adf_conclusion = Column(String(100))
 
-    
+    # Ljung-Box — ADD STAT AND CONCLUSION
+    ljungbox_stat = Column(Float)
     ljungbox_pvalue = Column(Float)
-    jarquebera_pvalue = Column(Float)
+    ljungbox_conclusion = Column(String(100))
 
-    # Relationships
+    # Jarque-Bera — ADD STAT AND CONCLUSION
+    jarquebera_stat = Column(Float)
+    jarquebera_pvalue = Column(Float)
+    jarquebera_conclusion = Column(String(100))
+
     model = relationship("SarimaxModel", back_populates="diagnostics")
 
 # 5. FORECAST CACHE (Page 1 Graph)

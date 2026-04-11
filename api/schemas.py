@@ -19,14 +19,12 @@ class ModelDropdownResponse(BaseModel):
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE 1: SIMPLIFIED METRICS (Executive Dashboard)
 # ════════════════════════════════════════════════════════════════════════════
-
-class DashboardStatsResponse(BaseModel):
-    total_records: int
-    data_quality_pct: float
-    revenue_total: float
-    growth_rate: float
-    expected_bookings: int
-    peak_travel_period: str
+class ChartPoint(BaseModel):
+    month: str
+    actual: float
+    predicted: float
+    lowerCI: float
+    upperCI: float
 
 class ForecastGraphPoint(BaseModel):
     date: datetime
@@ -38,9 +36,36 @@ class ForecastGraphPoint(BaseModel):
 class ForecastGraphResponse(BaseModel):
     data: List[ForecastGraphPoint]
 
+class DashboardStatsResponse(BaseModel):
+    total_records: int
+    data_quality_pct: float
+    revenue_total: float
+    growth_rate: float
+    expected_bookings: int
+    peak_travel_period: str
+    bookings_forecast: List[ChartPoint] = []
+
+class StrategicAction(BaseModel):
+    priority: str        # "HIGH" | "MEDIUM" | "LOW"
+    category: str        # "Pricing" | "Staffing" | "Marketing"
+    action: str          # human-readable recommendation
+    trigger: str         # what forecast condition triggered this
+
+class StrategicActionsResponse(BaseModel):
+    actions: List[StrategicAction]
+    generated_for_period: str
+
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE 2: ADVANCED METRICS (MLOps View)
 # ════════════════════════════════════════════════════════════════════════════
+# --- Coordinate Shapes for Charts ---
+class ResidualPoint(BaseModel):
+    fitted: float
+    residual: float
+
+class correlationPoint(BaseModel):
+    lag: int
+    value: float
 
 class ModelParams(BaseModel):
     order: List[int]          # [p, d, q]
@@ -50,20 +75,34 @@ class ModelParams(BaseModel):
 class ModelStatistics(BaseModel):
     rmse: float
     mae: float
-    mape: float
-    wmape: Optional[float] = None  # Optional since it might be added later
+    wmape: float
     
 class ModelTests(BaseModel):
     adf_stat: float
     adf_pvalue: float
-    adf_conclusion: str
+    adf_conclusion: str         # "Series is stationary" | "Series is non-stationary"
+    ljungbox_stat: float        # ADD THIS — you have it in DB
     ljungbox_pvalue: float
+    ljungbox_conclusion: str    # ADD THIS — for the diagnostics table
+    jarquebera_stat: float      # ADD THIS
     jarquebera_pvalue: float
+    jarquebera_conclusion: str  # ADD THIS
 
+# 1. Add this shape for the ACF/PACF bar charts
+class CorrelationPoint(BaseModel):
+    lag: int
+    value: float
+
+# 2. Add this shape for the Scatter plot
+class ResidualPoint(BaseModel):
+    fitted: float
+    residual: float
+
+# 3. Update AdvancedCharts to use these new shapes
 class AdvancedCharts(BaseModel):
-    residuals: List[Dict[str, float]] # e.g. [{"fitted": 10.5, "residual": -0.2}]
-    acf: List[float]
-    pacf: List[float]
+    residuals: List[ResidualPoint] = []
+    acf: List[CorrelationPoint] = []
+    pacf: List[CorrelationPoint] = []
 
 class AdvancedMetricsResponse(BaseModel):
     model_params: ModelParams
@@ -87,6 +126,11 @@ class HistoricalDataResponse(BaseModel):
 class RetrainRequest(BaseModel):
     exogenous_factors: List[str]
     target_variable: str = "Booking Date" # Hardcoded per UI specs
+class RetrainStatusResponse(BaseModel):
+    status: str
+    message: str
+    new_records_used: int | None = None
+
 
 class ForecastRequest(BaseModel):
     model_id: Optional[int] = None

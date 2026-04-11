@@ -2,14 +2,23 @@ import io
 import joblib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import os
+from dotenv import load_dotenv
 
 # 1. IMPORT YOUR NEW 5-TABLE ARCHITECTURE
 from domain.models import Base, SarimaxModel, ForecastSnapshot, ModelDiagnostic, ForecastCache, TrainingDataLog
 
-# 2. DATABASE SETUP
-DB_URL = "sqlite:///data/xocompass_models.db"
-# connect_args is critical for FastAPI + SQLite to prevent thread crashes
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False}, echo=False, future=True)
+load_dotenv()
+# URL from .env (Neon DB)
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./xocompass.db")
+
+# Connect to Neon DB
+if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    # the path for the Neon Database
+    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 3. REPOSITORY FUNCTIONS
