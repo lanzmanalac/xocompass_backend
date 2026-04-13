@@ -3,6 +3,7 @@ import joblib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # 1. IMPORT YOUR NEW 5-TABLE ARCHITECTURE
@@ -14,10 +15,19 @@ SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./xocompass.db")
 
 # Connect to Neon DB
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL, 
+        connect_args={"check_same_thread": False}
+    )
 else:
     # the path for the Neon Database
-    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=2,
+        pool_recycle=300,
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -54,8 +64,26 @@ def fetch_dashboard_stats(model_id: int) -> dict | None:
         }
 
 def fetch_model_binary(model_id: int | None = None) -> tuple:
-    """
-    WARNING: This function needs to be rewritten in Day 3 to load from a file path, 
-    not a BLOB. Left as placeholder to prevent API crashes.
-    """
-    pass
+    with SessionLocal() as session:
+        if model_id:
+            record = session.query(SarimaxModel).filter(
+                SarimaxModel.id == model_id
+            ).first()
+        else:
+            record = session.query(SarimaxModel).filter(
+                SarimaxModel.is_active == True
+            ).first()
+        if not record:
+            raise ValueError("No active model found. Run the orchestrator first.")
+        
+        path = Path(record.model_path)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Model file missing at {path}. Retrain to regenerate."
+            )
+        
+        return joblib.load(path), {
+            "model_id": record.id,
+            "train_end_date": record.train_end_date,
+            "exog_features": record.exog_features_json or [],
+        }

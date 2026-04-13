@@ -140,15 +140,9 @@ def get_advanced_metrics(model_id: int, db: Session = Depends(get_db)):
             jarquebera_conclusion=diag.jarquebera_conclusion or "Pending",
         ),
         charts=AdvancedCharts(
-            residuals=[
-                {"fitted": 100 + i*5, "residual": (i % 6) - 3} for i in range(30)
-            ],
-            acf=[
-                {"lag": i, "value": 0.9 if i == 0 else 0.8 / (i + 1)} for i in range(12)
-            ],
-            pacf=[
-                {"lag": i, "value": 0.9 if i == 0 else 0.4 / (i + 1)} for i in range(12)
-            ]
+            residuals=[ResidualPoint(**r) for r in (diag.residuals_json or [])],
+            acf=[CorrelationPoint(**p) for p in (diag.acf_values_json or [])],
+            pacf=[CorrelationPoint(**p) for p in (diag.pacf_values_json or [])]
         )
     )
 
@@ -160,13 +154,13 @@ def get_historical_ledger(db: Session = Depends(get_db)):
 
     points = []
     for r in records:
-        exog = r.exog_snapshot or {}
+        exog = r.additional_exog_json or {}
         points.append(HistoricalDataPoint(
-            date=r.record_date,
-            bookings=r.booking_value,
-            is_holiday=bool(exog.get("holiday_lead_2", 0)),
-            weather_indicator=exog.get("typhoon_msw", None)
-        ))
+        date=r.record_date,
+        bookings=r.booking_value,
+        is_holiday=r.is_holiday,
+        weather_indicator=r.weather_indicator
+    ))
 
     return HistoricalDataResponse(data=points)
 
