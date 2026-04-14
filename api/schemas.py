@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -124,8 +124,11 @@ class HistoricalDataResponse(BaseModel):
     data: List[HistoricalDataPoint]
 
 class RetrainRequest(BaseModel):
-    exogenous_factors: List[str]
-    target_variable: str = "Booking Date" # Hardcoded per UI specs
+    time_period: Literal["7 Days", "14 Days", "21 Days", "30 Days", "90 Days", "Whole Data Set (2013-Present)"] = "30 Days"
+    target_variable: Literal["Booking Date"] = "Booking Date"
+    external_factors: List[str] = ["Typhoon", "Rainfall Index", "Temperature", "Wind Speed", "Holiday"]
+    model_selection: Literal["ARIMA", "SARIMA", "SARIMAX"] = "SARIMAX"
+
 class RetrainStatusResponse(BaseModel):
     status: str
     message: str

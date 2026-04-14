@@ -91,7 +91,7 @@ def _climatological_typhoon_flag(future_index):
 # 6C. Master Evaluation & Forecast Function
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_step6_evaluation(step1, step3, step5):
+def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HORIZON):
     """
     STEP 6 — EVALUATION (The Business Value)
 
@@ -119,7 +119,9 @@ def run_step6_evaluation(step1, step3, step5):
     train_y_raw = step3["train_y_raw"]
     test_y_raw  = step3["test_y_raw"]
     test_X      = step3["test_X"]
-
+    
+    if test_X is not None and test_X.empty: test_X = None
+    
     # ═══════════════════════════════════════════════════════════════════════
     # 6.1  TEST-SET PREDICTIONS
     #
@@ -202,11 +204,11 @@ def run_step6_evaluation(step1, step3, step5):
     # The CI is now SYMMETRIC around the point forecast (as SARIMAX
     # produces Gaussian prediction intervals on the native scale).
     # ═══════════════════════════════════════════════════════════════════════
-    print(f"\n── Generating {FORECAST_HORIZON}-Week Future Forecast ──")
+    print(f"\n── Generating {forecast_steps}-Week Future Forecast ──")
 
     future_idx = pd.date_range(
         w.index.max() + timedelta(days=7),
-        periods=FORECAST_HORIZON,
+        periods=forecast_steps,
         freq=WEEKLY_RULE,
     )
     fc = pd.DataFrame(index=future_idx)
@@ -239,7 +241,10 @@ def run_step6_evaluation(step1, step3, step5):
 
     # ── Run SARIMAX forecast ──
     fc_X = fc[ALL_EXOG].astype(float)
-    fobj = fitted.get_forecast(steps=FORECAST_HORIZON, exog=fc_X)
+
+    if fc_X.empty: fc_X = None
+    
+    fobj = fitted.get_forecast(steps=forecast_steps, exog=fc_X)
 
     # ── FIX 2: Direct predictions, no expm1() ──
     # Predictions are already in booking-count units.

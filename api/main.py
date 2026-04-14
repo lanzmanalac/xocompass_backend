@@ -299,22 +299,37 @@ async def trigger_retrain(
     request: RetrainRequest,
     db: Session = Depends(get_db)
 ):
-    """
-    Page 3: Triggers model retraining.
-    Phase 1: Returns a stub response.
-    Phase 2 (Block B): Replace stub with real pipeline call.
-    """
-    # COUNT new records available since last training
-    last_model = db.query(SarimaxModel).filter(
-        SarimaxModel.is_active == True
-    ).first()
+    import subprocess
+    import sys
+    import os
+    import json
 
-    new_record_count = db.query(TrainingDataLog).count()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config_json_string = request.model_dump_json()
 
-    # STUB — replace this block in Block B
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "services.pipeline.orchestrator"],
+            input=config_json_string,
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=1500            
+        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Training failed. Check logs: {result.stderr[-500:]}"
+            )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Training timed out after 25 minutes.")
+    
+    new_model = db.query(SarimaxModel).filter(
+        SarimaxModel.is_active == True).first()
+    model_id_str = str(new_model.id) if new_model else "Unknown"
+
     return RetrainStatusResponse(
-        status="queued",
-        message="Retraining pipeline is being initialized. "
-                "This is a Phase 1 stub — real training coming in Block B.",
-        new_records_used=new_record_count
+        status="success",
+        message=f"Model retrained successfully. New Model ID: {model_id_str}",
+        new_records_used=db.query(TrainingDataLog).count()
     )

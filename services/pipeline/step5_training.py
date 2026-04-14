@@ -43,6 +43,9 @@ def run_step5_training(step1, step3):
 
     train_y  = step3["train_y"]        # <── FIX 2: raw counts
     train_X  = step3["train_X"]
+    
+    if train_X is not None and train_X.empty: train_X = None
+
     order    = step3["final_order"]     # <── FIX 3: from auto_arima
     seasonal = step3["final_seasonal"]  # <── FIX 3: from auto_arima
     lead_col = step1["lead_col"]
