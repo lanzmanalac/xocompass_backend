@@ -9,7 +9,7 @@ from datetime import datetime
 class ModelDropdownItem(BaseModel):
     id: int
     version: str
-    train_end_date: Optional[datetime] = None
+    created_at: datetime                         
     aic_score: Optional[float] = None
     notes: Optional[str] = None
 
