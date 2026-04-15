@@ -1,16 +1,26 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
-from fastapi.responses import RedirectResponse
+import json
+import logging
+import os
+import subprocess
+import sys
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
+from pandas.errors import EmptyDataError, ParserError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from typing import List
-from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from services.ingestion_service import ingest_csv
 
 # ── IMPORT OUR NEW STRICT DATA CONTRACTS ──
 from api.schemas import (
-    ModelDropdownResponse, DashboardStatsResponse, 
-    AdvancedMetricsResponse, HistoricalDataResponse, ForecastRequest,
+    ModelDropdownResponse, DashboardStatsResponse,
+    AdvancedMetricsResponse, HistoricalDataResponse,
     ModelDropdownItem, HistoricalDataPoint, ModelParams, ModelStatistics, ModelTests, AdvancedCharts,
     ForecastGraphPoint,
     ForecastGraphResponse,
@@ -19,11 +29,130 @@ from api.schemas import (
     RetrainRequest,
     RetrainStatusResponse,
     ChartPoint,
+    ResidualPoint,
+    CorrelationPoint,
+    ErrorDetail,
+    ErrorResponse,
+    HealthResponse,
+    DatabaseHealthResponse,
+    UploadResponse,
 )
 
 # ── IMPORT DATABASE ARCHITECTURE ──
 from repository.model_repository import SessionLocal
 from domain.models import SarimaxModel, ForecastSnapshot, ModelDiagnostic, TrainingDataLog, ForecastCache
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://xocompass.vercel.app",
+)
+
+
+def _load_cors_origins() -> list[str]:
+    raw_origins = os.getenv("CORS_ALLOWED_ORIGINS")
+    if raw_origins is None:
+        return list(DEFAULT_CORS_ORIGINS)
+
+    candidate = raw_origins.strip()
+    if not candidate:
+        return list(DEFAULT_CORS_ORIGINS)
+
+    if candidate.startswith("["):
+        try:
+            parsed_origins = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS must be a JSON array or a comma-separated list."
+            ) from exc
+
+        if not isinstance(parsed_origins, list) or not all(
+            isinstance(origin, str) and origin.strip() for origin in parsed_origins
+        ):
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS must contain one or more non-empty origin strings."
+            )
+
+        return [origin.strip() for origin in parsed_origins]
+
+    origins = [origin.strip() for origin in candidate.split(",") if origin.strip()]
+    if not origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must contain at least one valid origin.")
+
+    return origins
+
+
+def _error_code_for_status(status_code: int) -> str:
+    return {
+        400: "bad_request",
+        404: "not_found",
+        500: "internal_server_error",
+    }.get(status_code, "request_failed")
+
+
+def _build_error_response(
+    status_code: int,
+    message: str,
+    details: list[str] | None = None,
+    code: str | None = None,
+) -> JSONResponse:
+    payload = ErrorResponse(
+        error=ErrorDetail(
+            code=code or _error_code_for_status(status_code),
+            message=message,
+            details=details or [],
+        )
+    )
+    return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+
+def _extract_http_error_payload(detail: object) -> tuple[str, list[str]]:
+    if isinstance(detail, dict):
+        message = str(detail.get("message", "Request failed."))
+        raw_details = detail.get("details", [])
+        if isinstance(raw_details, list):
+            details = [str(item) for item in raw_details]
+        elif raw_details:
+            details = [str(raw_details)]
+        else:
+            details = []
+        return message, details
+
+    if isinstance(detail, list):
+        return "Request failed.", [str(item) for item in detail]
+
+    if detail is None:
+        return "Request failed.", []
+
+    return str(detail), []
+
+
+def _normalize_correlation_points(points: list[object] | None) -> list[CorrelationPoint]:
+    """Supports both legacy numeric lag arrays and the newer {lag, value} shape."""
+    normalized: list[CorrelationPoint] = []
+
+    for lag, point in enumerate(points or []):
+        if isinstance(point, dict):
+            raw_value = point.get("value")
+            if raw_value is None:
+                continue
+            normalized.append(
+                CorrelationPoint(
+                    lag=int(point.get("lag", lag)),
+                    value=float(raw_value),
+                )
+            )
+            continue
+
+        if isinstance(point, (int, float)):
+            normalized.append(CorrelationPoint(lag=lag, value=float(point)))
+
+    return normalized
+
 
 app = FastAPI(title="XoCompass API", version="10.1")
 
@@ -33,11 +162,76 @@ app = FastAPI(title="XoCompass API", version="10.1")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "https://xocompass.vercel.app"],
+    allow_origins=_load_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def handle_http_exception(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    del request
+    message, details = _extract_http_error_payload(exc.detail)
+    return _build_error_response(exc.status_code, message, details)
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_validation_exception(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    del request
+
+    details = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error.get("loc", []))
+        message = error.get("msg", "Invalid request.")
+        details.append(f"{location}: {message}" if location else message)
+
+    return _build_error_response(
+        status_code=400,
+        message="Request validation failed.",
+        details=details,
+        code="bad_request",
+    )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def handle_database_exception(
+    request: Request, exc: SQLAlchemyError
+) -> JSONResponse:
+    logger.error(
+        "Database error on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return _build_error_response(
+        status_code=500,
+        message="Database operation failed.",
+        code="internal_server_error",
+    )
+
+
+@app.exception_handler(Exception)
+async def handle_unexpected_exception(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    logger.error(
+        "Unhandled error on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return _build_error_response(
+        status_code=500,
+        message="Internal server error.",
+        code="internal_server_error",
+    )
 
 def get_db():
     """Dependency to safely open and close database sessions for every request."""
@@ -51,6 +245,27 @@ def get_db():
 def home():
     return RedirectResponse(url="/docs")
 
+
+@app.get("/health", response_model=HealthResponse)
+def healthcheck() -> HealthResponse:
+    """Confirms that the API process is running."""
+    return HealthResponse(status="ok", service="api")
+
+
+@app.get("/health/db", response_model=DatabaseHealthResponse)
+def database_healthcheck(db: Session = Depends(get_db)) -> DatabaseHealthResponse:
+    """Confirms that the API can still reach the configured database."""
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        logger.exception("Database health check failed.")
+        raise HTTPException(
+            status_code=500,
+            detail="Database connectivity check failed.",
+        ) from exc
+
+    return DatabaseHealthResponse(status="ok", service="api", database="connected")
+
 # ════════════════════════════════════════════════════════════════════════════
 # 1. PRESENTATION LAYER ENDPOINTS (Wired to Mock Data)
 # ════════════════════════════════════════════════════════════════════════════
@@ -59,6 +274,9 @@ def home():
 def get_model_registry(db: Session = Depends(get_db)):
     """Page 2: Populates the model selection dropdown."""
     models = db.query(SarimaxModel).all()
+    if not models:
+        raise HTTPException(status_code=404, detail="No trained models found.")
+
     items = [
         ModelDropdownItem(
             id=m.id, version=m.pipeline_ver, train_end_date=m.train_end_date, aic_score=m.aic_score
@@ -81,16 +299,16 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
         growth_rate=snapshot.growth_rate,
         expected_bookings=snapshot.expected_bookings,
         peak_travel_period=snapshot.peak_travel_period,
-        # Injecting the mock data so the frontend chart can render
+        # Temporary mock data so the frontend can validate the API
+        # connection while the real forecasting payload is still in progress.
         bookings_forecast=[
-            { "month": "Jan", "actual": 280, "predicted": 295, "lowerCI": 260, "upperCI": 330 },
-            { "month": "Feb", "actual": 310, "predicted": 320, "lowerCI": 290, "upperCI": 350 },
-            { "month": "Mar", "actual": 340, "predicted": 355, "lowerCI": 320, "upperCI": 390 },
-            { "month": "Apr", "actual": 360, "predicted": 380, "lowerCI": 345, "upperCI": 420 },
-            { "month": "May", "actual": 395, "predicted": 410, "lowerCI": 370, "upperCI": 450 },
-            { "month": "Jun", "actual": 420, "predicted": 435, "lowerCI": 395, "upperCI": 470 }
-        ]
-            
+            ChartPoint(month="Jan", actual=280, predicted=295, lowerCI=260, upperCI=330),
+            ChartPoint(month="Feb", actual=310, predicted=320, lowerCI=290, upperCI=350),
+            ChartPoint(month="Mar", actual=340, predicted=355, lowerCI=320, upperCI=390),
+            ChartPoint(month="Apr", actual=360, predicted=380, lowerCI=345, upperCI=420),
+            ChartPoint(month="May", actual=395, predicted=410, lowerCI=370, upperCI=450),
+            ChartPoint(month="Jun", actual=420, predicted=435, lowerCI=395, upperCI=470),
+        ],
     )
 
 @app.get("/api/advanced-metrics/{model_id}",
@@ -141,8 +359,8 @@ def get_advanced_metrics(model_id: int, db: Session = Depends(get_db)):
         ),
         charts=AdvancedCharts(
             residuals=[ResidualPoint(**r) for r in (diag.residuals_json or [])],
-            acf=[CorrelationPoint(**p) for p in (diag.acf_values_json or [])],
-            pacf=[CorrelationPoint(**p) for p in (diag.pacf_values_json or [])]
+            acf=_normalize_correlation_points(diag.acf_values_json),
+            pacf=_normalize_correlation_points(diag.pacf_values_json),
         )
     )
 
@@ -152,31 +370,40 @@ def get_historical_ledger(db: Session = Depends(get_db)):
         TrainingDataLog.record_date.asc()
     ).all()
 
+    if not records:
+        raise HTTPException(status_code=404, detail="No historical booking data found.")
+
     points = []
     for r in records:
-        exog = r.additional_exog_json or {}
         points.append(HistoricalDataPoint(
-        date=r.record_date,
-        bookings=r.booking_value,
-        is_holiday=r.is_holiday,
-        weather_indicator=r.weather_indicator
-    ))
+            date=r.record_date,
+            bookings=r.booking_value,
+            is_holiday=r.is_holiday,
+            weather_indicator=r.weather_indicator
+        ))
 
     return HistoricalDataResponse(data=points)
 
-@app.post("/api/upload")
+@app.post("/api/upload", response_model=UploadResponse)
 async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Page 3: Safely ingests KJS CSV data and prevents duplicate dates."""
-    if not file.filename.endswith('.csv'):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are allowed.")
-        
+
     contents = await file.read()
     try:
         result = ingest_csv(contents, db)
-        return result
-    except Exception as e:
+        return UploadResponse(**result)
+    except (ValueError, EmptyDataError, ParserError) as exc:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("CSV ingestion failed.")
+        raise HTTPException(status_code=500, detail="CSV ingestion failed.") from exc
 
 @app.get("/api/forecast-graph/{model_id}", response_model=ForecastGraphResponse)
 def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
@@ -185,15 +412,25 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
     Returns historical actuals from training_data_log +
     future predictions from forecast_cache.
     """
+    model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
+
     # Historical actuals
     actuals = db.query(TrainingDataLog).order_by(
         TrainingDataLog.record_date.asc()
     ).all()
 
+    if not actuals:
+        raise HTTPException(status_code=404, detail="No historical booking data found.")
+
     # Cached predictions for this model
     predictions = db.query(ForecastCache).filter(
         ForecastCache.model_id == model_id
     ).order_by(ForecastCache.forecast_date.asc()).all()
+
+    if not predictions:
+        raise HTTPException(status_code=404, detail="No forecast data found for this model.")
 
     points = []
 
@@ -227,9 +464,9 @@ def get_strategic_actions(model_id: int, db: Session = Depends(get_db)):
     Derives actionable recommendations from forecast_cache data.
     Rule-based engine — no ML required.
     """
-    snapshot = db.query(ForecastSnapshot).filter(
-        ForecastSnapshot.model_id == model_id
-    ).first()
+    model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
 
     predictions = db.query(ForecastCache).filter(
         ForecastCache.model_id == model_id
@@ -299,11 +536,6 @@ async def trigger_retrain(
     request: RetrainRequest,
     db: Session = Depends(get_db)
 ):
-    import subprocess
-    import sys
-    import os
-    import json
-
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     config_json_string = request.model_dump_json()
 
@@ -317,19 +549,34 @@ async def trigger_retrain(
             timeout=1500            
         )
         if result.returncode != 0:
+            logger.error("Retraining pipeline failed: %s", result.stderr[-500:])
             raise HTTPException(
                 status_code=500,
-                detail=f"Training failed. Check logs: {result.stderr[-500:]}"
+                detail="Model retraining failed."
             )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Training timed out after 25 minutes.")
-    
+    except subprocess.TimeoutExpired as exc:
+        logger.exception("Retraining pipeline timed out.")
+        raise HTTPException(
+            status_code=500,
+            detail="Model retraining timed out after 25 minutes.",
+        ) from exc
+    except OSError as exc:
+        logger.exception("Retraining pipeline could not be started.")
+        raise HTTPException(
+            status_code=500,
+            detail="Model retraining could not be started.",
+        ) from exc
+
     new_model = db.query(SarimaxModel).filter(
         SarimaxModel.is_active == True).first()
-    model_id_str = str(new_model.id) if new_model else "Unknown"
+    if not new_model:
+        raise HTTPException(
+            status_code=500,
+            detail="Model retraining finished but no active model was found.",
+        )
 
     return RetrainStatusResponse(
         status="success",
-        message=f"Model retrained successfully. New Model ID: {model_id_str}",
+        message=f"Model retrained successfully. New Model ID: {new_model.id}",
         new_records_used=db.query(TrainingDataLog).count()
     )

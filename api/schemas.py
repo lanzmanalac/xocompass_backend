@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Literal
 from datetime import datetime
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -15,6 +15,26 @@ class ModelDropdownItem(BaseModel):
 
 class ModelDropdownResponse(BaseModel):
     available_models: List[ModelDropdownItem]
+
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    details: List[str] = Field(default_factory=list)
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+
+class DatabaseHealthResponse(HealthResponse):
+    database: str
+
+class UploadResponse(BaseModel):
+    status: str
+    message: str
+    new_records: int
 
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE 1: SIMPLIFIED METRICS (Executive Dashboard)
@@ -43,7 +63,13 @@ class DashboardStatsResponse(BaseModel):
     growth_rate: float
     expected_bookings: int
     peak_travel_period: str
-    bookings_forecast: List[ChartPoint] = []
+    bookings_forecast: List[ChartPoint] = Field(
+        default_factory=list,
+        description=(
+            "Temporary mock chart data for frontend integration while the "
+            "data science forecast pipeline is still being finalized."
+        ),
+    )
 
 class StrategicAction(BaseModel):
     priority: str        # "HIGH" | "MEDIUM" | "LOW"
@@ -63,7 +89,8 @@ class ResidualPoint(BaseModel):
     fitted: float
     residual: float
 
-class correlationPoint(BaseModel):
+
+class CorrelationPoint(BaseModel):
     lag: int
     value: float
 
@@ -88,21 +115,10 @@ class ModelTests(BaseModel):
     jarquebera_pvalue: float
     jarquebera_conclusion: str  # ADD THIS
 
-# 1. Add this shape for the ACF/PACF bar charts
-class CorrelationPoint(BaseModel):
-    lag: int
-    value: float
-
-# 2. Add this shape for the Scatter plot
-class ResidualPoint(BaseModel):
-    fitted: float
-    residual: float
-
-# 3. Update AdvancedCharts to use these new shapes
 class AdvancedCharts(BaseModel):
-    residuals: List[ResidualPoint] = []
-    acf: List[CorrelationPoint] = []
-    pacf: List[CorrelationPoint] = []
+    residuals: List[ResidualPoint] = Field(default_factory=list)
+    acf: List[CorrelationPoint] = Field(default_factory=list)
+    pacf: List[CorrelationPoint] = Field(default_factory=list)
 
 class AdvancedMetricsResponse(BaseModel):
     model_params: ModelParams
