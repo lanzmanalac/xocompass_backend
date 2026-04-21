@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 8080
 
 # 7. The exact terminal command to start your FastAPI server
-CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 4

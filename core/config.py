@@ -41,4 +41,4 @@ GRIDSEARCH_MAX_Q = 2  # Max non-seasonal MA order
 GRIDSEARCH_MAX_PP = 1  # Max seasonal AR order
 GRIDSEARCH_MAX_DD = 1  # Max seasonal differencing
 GRIDSEARCH_MAX_QQ = 1  # Max seasonal MA order
-GRIDSEARCH_STEPWISE = True  # Stepwise for speed (False = exhaustive)
+GRIDSEARCH_STEPWISE = False 

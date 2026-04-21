@@ -211,6 +211,8 @@ def run_step3_stationarity(step1):
             error_action="ignore",
             information_criterion="aic",
             trace=True,
+            n_jobs=-1,  # Instructs pmdarima to use all 4 CPU cores
+
         )
         gs_elapsed = time.time() - t0_gs
 
