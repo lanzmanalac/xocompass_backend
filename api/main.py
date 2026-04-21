@@ -548,6 +548,12 @@ def trigger_retrain(
             text=True,
             timeout=1500            
         )
+        # Force the hidden logs to print to Google Cloud Run
+        print("=== ORCHESTRATOR STDOUT ===", flush=True)
+        print(result.stdout, flush=True)
+        print("=== ORCHESTRATOR STDERR ===", flush=True)
+        print(result.stderr, flush=True)
+
         if result.returncode != 0:
             logger.error("Retraining pipeline failed: %s", result.stderr[-500:])
             raise HTTPException(
@@ -567,8 +573,13 @@ def trigger_retrain(
             detail="Model retraining could not be started.",
         ) from exc
 
+    # Force the DB connection to wake up and look at the present!
+    db.commit()
+    db.expire_all()
+
     new_model = db.query(SarimaxModel).filter(
         SarimaxModel.is_active == True).first()
+        
     if not new_model:
         raise HTTPException(
             status_code=500,
