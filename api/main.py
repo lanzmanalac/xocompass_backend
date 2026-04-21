@@ -532,7 +532,7 @@ def get_strategic_actions(model_id: int, db: Session = Depends(get_db)):
     )
 
 @app.post("/api/retrain", response_model=RetrainStatusResponse)
-async def trigger_retrain(
+def trigger_retrain(
     request: RetrainRequest,
     db: Session = Depends(get_db)
 ):
