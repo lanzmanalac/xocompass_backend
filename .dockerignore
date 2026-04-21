@@ -1,0 +1,14 @@
+# .dockerignore
+.venv
+venv/
+__pycache__/
+*.pyc
+xocompass.db
+.env
+.git
+
+# Ignore all CSV files
+*.csv
+
+data/
+*.db
