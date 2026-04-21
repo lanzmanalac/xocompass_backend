@@ -291,7 +291,26 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
     
     if not snapshot:
         raise HTTPException(status_code=404, detail="Snapshot not found for this model.")
-    
+        # Pull real forecast data from ForecastCache — no hardcoding
+    cache_rows = (
+        db.query(ForecastCache)
+        .filter(ForecastCache.model_id == model_id)
+        .order_by(ForecastCache.forecast_date.asc())
+        .limit(6)
+        .all()
+    )
+
+    bookings_forecast = [
+        ChartPoint(
+            month=row.forecast_date.strftime("%b"),
+            actual=0.0,
+            predicted=row.predicted or 0.0,
+            lowerCI=row.lower_bound or 0.0,
+            upperCI=row.upper_bound or 0.0,
+        )
+        for row in cache_rows
+    ]
+
     return DashboardStatsResponse(
         total_records=snapshot.total_records,
         data_quality_pct=snapshot.data_quality_pct,
@@ -299,17 +318,9 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
         growth_rate=snapshot.growth_rate,
         expected_bookings=snapshot.expected_bookings,
         peak_travel_period=snapshot.peak_travel_period,
-        # Temporary mock data so the frontend can validate the API
-        # connection while the real forecasting payload is still in progress.
-        bookings_forecast=[
-            ChartPoint(month="Jan", actual=280, predicted=295, lowerCI=260, upperCI=330),
-            ChartPoint(month="Feb", actual=310, predicted=320, lowerCI=290, upperCI=350),
-            ChartPoint(month="Mar", actual=340, predicted=355, lowerCI=320, upperCI=390),
-            ChartPoint(month="Apr", actual=360, predicted=380, lowerCI=345, upperCI=420),
-            ChartPoint(month="May", actual=395, predicted=410, lowerCI=370, upperCI=450),
-            ChartPoint(month="Jun", actual=420, predicted=435, lowerCI=395, upperCI=470),
-        ],
+        bookings_forecast=bookings_forecast,
     )
+
 
 @app.get("/api/advanced-metrics/{model_id}",
          response_model=AdvancedMetricsResponse)
@@ -579,7 +590,7 @@ def trigger_retrain(
 
     new_model = db.query(SarimaxModel).filter(
         SarimaxModel.is_active == True).first()
-        
+
     if not new_model:
         raise HTTPException(
             status_code=500,
