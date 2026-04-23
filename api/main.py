@@ -280,7 +280,7 @@ def get_model_registry(db: Session = Depends(get_db)):
 
     items = [
         ModelDropdownItem(
-            id=m.id, version=m.pipeline_ver, created_at=m.created_at, aic_score=m.aic_score
+            id=m.id, model_name=m.model_name, version=m.pipeline_ver, created_at=m.created_at, aic_score=m.aic_score
         ) for m in models
     ]
     return ModelDropdownResponse(available_models=items)

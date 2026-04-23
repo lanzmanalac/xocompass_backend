@@ -8,6 +8,7 @@ from datetime import datetime
 
 class ModelDropdownItem(BaseModel):
     id: int
+    model_name: str
     version: str
     created_at: datetime                         
     aic_score: Optional[float] = None
