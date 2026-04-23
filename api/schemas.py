@@ -153,3 +153,6 @@ class RetrainStatusResponse(BaseModel):
 
 class ForecastRequest(BaseModel):
     model_id: Optional[int] = None
+
+class ModelRenameRequest(BaseModel):
+    new_model_name: str

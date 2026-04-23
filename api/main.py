@@ -30,6 +30,7 @@ from api.schemas import (
     RetrainStatusResponse,
     ChartPoint,
     ResidualPoint,
+    ModelRenameRequest,
     CorrelationPoint,
     ErrorDetail,
     ErrorResponse,
@@ -602,3 +603,48 @@ def trigger_retrain(
         message=f"Model retrained successfully. New Model ID: {new_model.id}",
         new_records_used=db.query(TrainingDataLog).count()
     )
+
+from api.schemas import ModelRenameRequest # Make sure this is in your imports!
+
+# ── 1. RENAME ENDPOINT ──
+@app.patch("/api/models/{model_id}/rename")
+def rename_model(model_id: int, request: ModelRenameRequest, db: Session = Depends(get_db)):
+    """Page 2: Renames a specific model in the registry."""
+    model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
+    
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found.")
+        
+    old_name = model.model_name
+    model.model_name = request.new_model_name
+    db.commit()
+    
+    return {"status": "success", "message": f"Model '{old_name}' renamed to '{request.new_model_name}'"}
+
+
+# ── 2. DELETE ENDPOINT (Safe Deletion) ──
+@app.delete("/api/models/{model_id}")
+def delete_model(model_id: int, db: Session = Depends(get_db)):
+    """Page 2: Deletes a model from the registry, its dependencies, and the server disk."""
+    model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
+    
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found.")
+    
+    # STEP A: Physically remove the .joblib file from the server so we don't run out of storage
+    if model.model_path and os.path.exists(model.model_path):
+        try:
+            os.remove(model.model_path)
+        except Exception as e:
+            logger.warning(f"Could not delete physical file at {model.model_path}. Error: {e}")
+
+    # STEP B: Clear Foreign Key dependencies so Postgres doesn't crash
+    db.query(ModelDiagnostic).filter(ModelDiagnostic.model_id == model_id).delete()
+    db.query(ForecastCache).filter(ForecastCache.model_id == model_id).delete()
+    db.query(ForecastSnapshot).filter(ForecastSnapshot.model_id == model_id).delete()
+
+    # STEP C: Finally, delete the model itself
+    db.delete(model)
+    db.commit()
+    
+    return {"status": "success", "message": f"Model {model_id} permanently deleted."}
