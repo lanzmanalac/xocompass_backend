@@ -67,6 +67,7 @@ class DashboardStatsResponse(BaseModel):
     bookings_forecast: List[ChartPoint] = Field(
         default_factory=list,
         description=(
+            "Filler"
         ),
     )
 
