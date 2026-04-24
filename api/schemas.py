@@ -67,8 +67,6 @@ class DashboardStatsResponse(BaseModel):
     bookings_forecast: List[ChartPoint] = Field(
         default_factory=list,
         description=(
-            "Temporary mock chart data for frontend integration while the "
-            "data science forecast pipeline is still being finalized."
         ),
     )
 

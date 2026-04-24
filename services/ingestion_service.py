@@ -8,6 +8,10 @@ from zoneinfo import ZoneInfo
 
 def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     ph_tz = ZoneInfo("Asia/Manila")
+
+    db.query(TrainingDataLog).delete()
+    db.commit()
+
     df = pd.read_csv(io.BytesIO(file_bytes))
 
     # 1. Find the date column dynamically
