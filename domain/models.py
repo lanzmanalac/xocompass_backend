@@ -61,6 +61,9 @@ class TrainingDataLog(Base):
     # Exogenous Features
     is_holiday = Column(Boolean, default=False)
     weather_indicator = Column(Float, nullable=True) # typhoon_msw
+
+    weekly_revenue = Column(Float, nullable=True)        # ← add this
+
     additional_exog_json = Column(JSON, nullable=True)
     # additional_exog_json is a JSON column that can store any additional exogenous features 
     # that are not explicitly defined in the model. This is a catch-all for future variables.

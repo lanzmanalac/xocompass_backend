@@ -35,7 +35,7 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     print(f"   Revenue column detected: {repr(revenue_col)}")
 
 
-    df['date'] = pd.to_datetime(df[date_col], errors='coerce')
+    df['date'] = pd.to_datetime(df[date_col], format='mixed', dayfirst=False, errors='coerce')
     df = df.dropna(subset=['date'])
 
     # 2. Group into Weekly Buckets
@@ -51,27 +51,16 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
         numeric_rev = numeric_rev.where(~is_negative, other=-numeric_rev)
         df["_revenue_cleaned"] = numeric_rev
 
-        # ── DEBUG: inspect what the cleaning actually produced ──
-        print(f"   🔍 Revenue debug:")
-        print(f"      Raw sample (first 3):     {list(df[revenue_col].head(3))}")
-        print(f"      Cleaned sample (first 3): {list(cleaned.head(3))}")
-        print(f"      Numeric sample (first 3): {list(numeric_rev.head(3))}")
-        print(f"      Total before groupby:     ₱{numeric_rev.sum():,.2f}")
-        print(f"      Non-zero rows:            {(numeric_rev > 0).sum()}")
-
         weekly_revenue = df.groupby("week")["_revenue_cleaned"].sum().reset_index(name="weekly_revenue")
-        print(f"      Weekly revenue sample:\n{weekly_revenue.head(3)}")
-        print(f"      Weekly revenue total:     ₱{weekly_revenue['weekly_revenue'].sum():,.2f}")
-
         weekly = weekly_counts.merge(weekly_revenue, on="week", how="left")
-        print(f"      After merge NaN count:    {weekly['weekly_revenue'].isna().sum()}")
-        print(f"      After merge total:        ₱{weekly['weekly_revenue'].sum():,.2f}")
-        
+        total_revenue = float(weekly["weekly_revenue"].sum())   # ← inside if block
+        print(f"   💰 Total revenue: ₱{total_revenue:,.2f}")
+
     else:
         weekly = weekly_counts.copy()
         weekly["weekly_revenue"] = None
+        total_revenue = None   # ← inside else block
         print("   ⚠️  No Net Amount column — revenue will use proxy at forecast time.")
-
     # 3. Deduplication (prevents double-counting if the client uploads the same file twice)
     existing_dates = {
         row.record_date.replace(tzinfo=None)
@@ -108,6 +97,7 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
             booking_value=float(row["booking_value"]),
             is_holiday=is_hol,
             weather_indicator=0.0,
+            weekly_revenue=float(row["weekly_revenue"]) if row.get("weekly_revenue") is not None else None,
             additional_exog_json={"is_long_weekend": int(is_lw)},
         ))
 
@@ -121,5 +111,6 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     return {
         "status": "success",
         "message": f"Ingested {len(db_rows)} new weekly records.",
-        "new_records": len(db_rows)
+        "new_records": len(db_rows),
+        "revenue_total": total_revenue,
     }

@@ -433,33 +433,16 @@ def persist_to_neon(
         raise
 
 def fetch_revenue_from_db() -> float | None:
-    """
-    Reads weekly_revenue from additional_exog_json in training_data_log.
-    Returns the sum, or None if no revenue data was ever stored.
-    """
     with SessionLocal() as db:
         records = db.query(TrainingDataLog).all()
 
-        # ── DEBUG: inspect first 3 records ──
-    print(f"   🔍 Revenue DB debug ({len(records)} records):")
-    for r in records[:3]:
-        print(f"      record_date={r.record_date}, "
-              f"booking_value={r.booking_value}, "
-              f"additional_exog_json={r.additional_exog_json}")
+    revenues = [r.weekly_revenue for r in records if r.weekly_revenue is not None]
 
-    total = 0.0
-    has_any = False
-    for r in records:
-        if r.additional_exog_json:
-            rev = r.additional_exog_json.get("weekly_revenue")
-            if rev is not None:
-                total += float(rev)
-                has_any = True
-
-    if not has_any:
+    if not revenues:
         print("   ⚠️  No weekly_revenue found in DB. Will use booking-proxy fallback.")
         return None
 
+    total = sum(revenues)
     print(f"   💰 Revenue from DB: ₱{total:,.2f}")
     return total
 
