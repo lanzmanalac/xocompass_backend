@@ -57,6 +57,10 @@ class ForecastGraphPoint(BaseModel):
 class ForecastGraphResponse(BaseModel):
     data: List[ForecastGraphPoint]
 
+class YearlyBookingPoint(BaseModel):
+    year: str
+    bookings: str
+
 class DashboardStatsResponse(BaseModel):
     total_records: int
     data_quality_pct: float
@@ -70,6 +74,7 @@ class DashboardStatsResponse(BaseModel):
             "Filler"
         ),
     )
+    yearly_bookings: List[YearlyBookingPoint] = []
 
 class StrategicAction(BaseModel):
     priority: str        # "HIGH" | "MEDIUM" | "LOW"
