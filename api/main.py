@@ -672,3 +672,4 @@ def debug_db_truth(db: Session = Depends(get_db)):
         "models_found_in_this_db": result[2],
         "is_using_neon": "neon.tech" in str(db.get_bind().url)
     }
+

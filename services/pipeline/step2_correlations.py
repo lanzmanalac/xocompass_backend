@@ -45,7 +45,10 @@ def run_step2_correlations(step1):
     print(f"  {'─' * 55}")
     for var, r in target_corr.items():
         sig = "⭐" if abs(r) > 0.15 else "  "
-        bar = "█" * int(abs(r) * 40)
+        if r is None or (isinstance(r, float) and (r != r)):  # NaN check
+            bar = "░" * 40  # or skip, or use 0
+        else:
+            bar = "█" * int(abs(r) * 40)
         print(f"  {sig} {var:25s}  r = {r:+.4f}  {'+'if r > 0 else '-'}{bar}")
     print(f"  {'─' * 55}")
 

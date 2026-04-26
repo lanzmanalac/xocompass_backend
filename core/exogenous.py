@@ -111,37 +111,93 @@ class PHHolidayEngine:
 class TyphoonInjector:
     """Injects PAGASA typhoon wind-speed signals into a daily time series."""
 
-    STORMS = [
-        {"name": "KARDING",  "par_beg": "2022-09-22", "par_end": "2022-09-26", "msw": 195},
-        {"name": "PAENG",    "par_beg": "2022-10-26", "par_end": "2022-10-31", "msw": 110},
-        {"name": "EGAY",     "par_beg": "2023-07-21", "par_end": "2023-07-28", "msw": 185},
-        {"name": "GORING",   "par_beg": "2023-08-25", "par_end": "2023-09-02", "msw": 185},
-        {"name": "JENNY",    "par_beg": "2023-10-03", "par_end": "2023-10-09", "msw": 100},
-        {"name": "CARINA",   "par_beg": "2024-07-21", "par_end": "2024-07-27", "msw": 175},
-        {"name": "KRISTINE", "par_beg": "2024-10-21", "par_end": "2024-10-27", "msw": 95},
-        {"name": "PEPITO",   "par_beg": "2024-11-16", "par_end": "2024-11-20", "msw": 195},
-        {"name": "NIKA",     "par_beg": "2024-11-10", "par_end": "2024-11-13", "msw": 100},
-        {"name": "RAMIL",    "par_beg": "2025-10-17", "par_end": "2025-10-20", "msw": 65},
+    STORMS: list[dict] = [
+        # ── 2013 ──────────────────────────────────────────────────────────
+        {"name": "GORIO",   "par_beg": "2013-06-27", "par_end": "2013-06-30", "msw": 85},
+        {"name": "SANTI",   "par_beg": "2013-10-08", "par_end": "2013-10-12", "msw": 150},
+        # ── 2014 ──────────────────────────────────────────────────────────
+        {"name": "GLENDA",  "par_beg": "2014-07-13", "par_end": "2014-07-16", "msw": 150},
+        # ── 2017 ──────────────────────────────────────────────────────────
+        {"name": "MARING",  "par_beg": "2017-09-11", "par_end": "2017-09-13", "msw": 85},
+        # ── 2020 ──────────────────────────────────────────────────────────
+        {"name": "AMBO",    "par_beg": "2020-05-10", "par_end": "2020-05-17", "msw": 155},
+        {"name": "BUTCHOY", "par_beg": "2020-06-11", "par_end": "2020-06-12", "msw": 65},
+        {"name": "ULYSSES", "par_beg": "2020-11-08", "par_end": "2020-11-13", "msw": 155},
+        # ── 2021 ──────────────────────────────────────────────────────────
+        {"name": "JOLINA",  "par_beg": "2021-09-06", "par_end": "2021-09-09", "msw": 120},
+        # ── 2022 ──────────────────────────────────────────────────────────
+        {"name": "KARDING", "par_beg": "2022-09-22", "par_end": "2022-09-26", "msw": 195},
+        {"name": "PAENG",   "par_beg": "2022-10-26", "par_end": "2022-10-31", "msw": 110},
+        # ── 2025 ──────────────────────────────────────────────────────────
+        {"name": "RAMIL",   "par_beg": "2025-10-17", "par_end": "2025-10-20", "msw": 65},
     ]
 
-    def generate(self, start, end):
-        """Create a daily typhoon_msw series. 0.0 where no storm is active."""
-        idx = pd.date_range(start, end, freq="D")
-        df = pd.DataFrame({"typhoon_msw": 0.0}, index=idx)
+    # Gaps with no Bulacan-affecting typhoons:
+    #   2015, 2016, 2018, 2019, 2023, 2024
+    # These are genuine zero-typhoon years for this province, not missing data.
+    # The model will correctly treat those weeks as baseline.
+    _STORM_YEARS_WITH_NO_ACTIVITY = {2015, 2016, 2018, 2019, 2023, 2024}
+
+    def generate(self, start, end) -> pd.DataFrame:
+        """
+        Returns a daily DataFrame with column `typhoon_msw` (float, km/h).
+        Value is 0.0 on non-storm days; MSW on storm days (taking the max
+        if two storms overlap, though this has not occurred in this dataset).
+
+        Args:
+            start: Any type accepted by pd.Timestamp (str, datetime, Timestamp)
+            end:   Any type accepted by pd.Timestamp
+
+        Returns:
+            pd.DataFrame with DatetimeIndex named 'date' and column 'typhoon_msw'.
+
+        Raises:
+            ValueError: if start > end (nonsensical date range).
+        """
+        start_ts = pd.Timestamp(start)
+        end_ts   = pd.Timestamp(end)
+
+        if start_ts > end_ts:
+            raise ValueError(
+                f"TyphoonInjector.generate() received start={start_ts} > end={end_ts}. "
+                "Verify the caller passes (series_start, series_end) in chronological order."
+            )
+
+        idx = pd.date_range(start_ts, end_ts, freq="D")
+        df  = pd.DataFrame({"typhoon_msw": 0.0}, index=idx)
         df.index.name = "date"
-        applied = []
+
+        applied: list[str] = []
+        skipped: list[str] = []  # storms outside the requested window (for auditability)
 
         for s in self.STORMS:
-            beg = pd.Timestamp(s["par_beg"])
+            beg   = pd.Timestamp(s["par_beg"])
             end_d = pd.Timestamp(s["par_end"])
+
+            # Guard: storm entirely outside the requested window
+            if end_d < start_ts or beg > end_ts:
+                skipped.append(s["name"])
+                continue
+
             mask = (df.index >= beg) & (df.index <= end_d)
             if mask.sum() > 0:
+                # np.maximum preserves any higher MSW from an overlapping storm
                 df.loc[mask, "typhoon_msw"] = np.maximum(
-                    df.loc[mask, "typhoon_msw"], s["msw"]
+                    df.loc[mask, "typhoon_msw"], float(s["msw"])
                 )
                 applied.append(s["name"])
 
-        print(f"  🌀 {len(applied)} typhoons injected: {', '.join(applied)}")
+        n_storm_days = int((df["typhoon_msw"] > 0).sum())
+        print(
+            f"  🌀 {len(applied)} typhoon(s) injected over {n_storm_days} storm-days: "
+            f"{', '.join(applied)}"
+        )
+        if skipped:
+            print(
+                f"     ↳ {len(skipped)} storm(s) outside window (skipped): "
+                f"{', '.join(skipped)}"
+            )
+
         return df
 
 

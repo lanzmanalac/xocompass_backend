@@ -58,13 +58,6 @@ EXPORT_CSV = Path("data/training_export.csv")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def export_db_to_csv(csv_path: Path = EXPORT_CSV) -> str:
-    """
-    Queries training_data_log from Neon and writes a transaction-level CSV
-    that step1_ingestion can read via its standard date-column detection.
-
-    Returns the CSV path as a string for direct use in run_step1_data_ingestion().
-    Raises ValueError if fewer than 20 weekly rows exist (insufficient for SARIMAX).
-    """
     print("\n📤 PRE-STEP: Exporting training_data_log → temporary CSV...")
 
     with SessionLocal() as db:
@@ -80,21 +73,32 @@ def export_db_to_csv(csv_path: Path = EXPORT_CSV) -> str:
             "Upload the KJS CSV via POST /api/upload before running the pipeline."
         )
 
-    # Expand weekly counts → individual transaction rows so step1's
-    # groupby("week").size() logic produces the correct weekly totals.
-    rows = [
-        {"Generation Date": r.record_date.strftime("%Y-%m-%d")}
-        for r in records
-        for _ in range(max(1, int(r.booking_value)))
-    ]
+    # Expand weekly counts → individual transaction rows for step1's groupby logic.
+    # Also carry the weekly_revenue forward so step1 can sum it correctly.
+    rows = []
+    for r in records:
+        weekly_rev = None
+        if r.additional_exog_json:
+            weekly_rev = r.additional_exog_json.get("weekly_revenue")
+
+        count = max(1, int(r.booking_value))
+        # Distribute revenue evenly across expanded rows so sum is preserved
+        per_row_rev = (weekly_rev / count) if weekly_rev else None
+
+        for _ in range(count):
+            row = {"Generation Date": r.record_date.strftime("%Y-%m-%d")}
+            if per_row_rev is not None:
+                row["Net Amount"] = round(per_row_rev, 4)
+            rows.append(row)
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(csv_path, index=False)
 
+    has_revenue = any("Net Amount" in r for r in rows)
     print(f"   ✅ Exported {len(rows):,} transaction rows "
           f"({len(records)} weekly buckets) → {csv_path}")
+    print(f"   💰 Net Amount column included: {has_revenue}")
     return str(csv_path)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST-STEP 5: Model file persistence (File-First pattern)
@@ -253,16 +257,14 @@ def compute_snapshot_kpis(
 
     avg_weekly     = float(w["bookings_weekly"].mean())
 
-
-    revenue_col = next((c for c in df_raw.columns if "net amount" in c.lower()), None) # hanap the net amount column in the uploaded csv file
-    if revenue_col:
-        clean_rev = df_raw[revenue_col].astype(str).str.replace(r'[^\d.]', '', regex=True) # cleans data to only include digits
-        clean_rev = pd.to_numeric(clean_rev, errors='coerce').fillna(0)
-        revenue_total = float(clean_rev.sum())
+    # REVENUE
+    if step1.get("revenue_total") is not None:
+        revenue_total = step1["revenue_total"]
     else:
-        revenue_total = float(w["bookings_weekly"].sum() * 4500)
+        avg_weekly    = float(w["bookings_weekly"].mean())
+        revenue_total = round(avg_weekly * 4_500 * 52, 2)
+        print(f"   ⚠️  Revenue proxy used: ₱{revenue_total:,.2f}")
 
-    revenue_total  = round(avg_weekly * 4_500 * 52, 2)
 
     # yearly growth rate
     if len(w) >= 104: 
@@ -430,6 +432,36 @@ def persist_to_neon(
         model_path.unlink(missing_ok=True)
         raise
 
+def fetch_revenue_from_db() -> float | None:
+    """
+    Reads weekly_revenue from additional_exog_json in training_data_log.
+    Returns the sum, or None if no revenue data was ever stored.
+    """
+    with SessionLocal() as db:
+        records = db.query(TrainingDataLog).all()
+
+        # ── DEBUG: inspect first 3 records ──
+    print(f"   🔍 Revenue DB debug ({len(records)} records):")
+    for r in records[:3]:
+        print(f"      record_date={r.record_date}, "
+              f"booking_value={r.booking_value}, "
+              f"additional_exog_json={r.additional_exog_json}")
+
+    total = 0.0
+    has_any = False
+    for r in records:
+        if r.additional_exog_json:
+            rev = r.additional_exog_json.get("weekly_revenue")
+            if rev is not None:
+                total += float(rev)
+                has_any = True
+
+    if not has_any:
+        print("   ⚠️  No weekly_revenue found in DB. Will use booking-proxy fallback.")
+        return None
+
+    print(f"   💰 Revenue from DB: ₱{total:,.2f}")
+    return total
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NEW: UI CONFIG BUILDER
@@ -470,6 +502,8 @@ if __name__ == "__main__":
     # 2. Extract Data
     csv_path = export_db_to_csv(EXPORT_CSV)
     step1 = run_step1_data_ingestion(csv_path)
+
+    step1["revenue_total"] = fetch_revenue_from_db()
 
     # 3. INTERCEPT 1: Exogenous Filtering
     if not pipeline_cfg["use_exog"]:

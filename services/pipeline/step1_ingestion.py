@@ -30,17 +30,6 @@ from core.exogenous import PHHolidayEngine, TyphoonInjector, weekly_intensity
 def run_step1_data_ingestion(csv_path="KJS Data.csv"):
     """
     STEP 1 — DATA INGESTION (The Prep & Context Engine)
-
-    v10.1 changes:
-      FIX 1: Typhoon hangover rolling window = 2 weeks (not 9).
-      FIX 2: Target variable 'y' is raw bookings_weekly (no log1p).
-             The column is named 'y' (not 'y_log') to make the removal
-             of the log transform explicit throughout the pipeline.
-
-    Returns:
-        dict with keys:
-            'df_raw', 'daily_df', 'weekly_df', 'holidays_df',
-            'OPTIMAL_LEAD', 'lead_col', 'ALL_EXOG'
     """
     print("╔" + "═" * 70 + "╗")
     print("║" + "  STEP 1 — DATA INGESTION (The Prep & Context Engine)".center(70) + "║")
@@ -276,4 +265,5 @@ def run_step1_data_ingestion(csv_path="KJS Data.csv"):
         "OPTIMAL_LEAD":  OPTIMAL_LEAD,
         "lead_col":      lead_col,
         "ALL_EXOG":      ALL_EXOG,
+        "revenue_total": None
     }
