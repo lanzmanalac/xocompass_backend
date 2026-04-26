@@ -1,8 +1,8 @@
-"""add missing model_path column
+"""initial master schema
 
-Revision ID: 42ab9f105117
+Revision ID: 7e2b14097928
 Revises: 
-Create Date: 2026-04-23 23:07:41.730882
+Create Date: 2026-04-26 23:00:29.464824
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '42ab9f105117'
+revision: str = '7e2b14097928'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -78,6 +78,7 @@ def upgrade() -> None:
     sa.Column('growth_rate', sa.Float(), nullable=True),
     sa.Column('expected_bookings', sa.Integer(), nullable=True),
     sa.Column('peak_travel_period', sa.String(length=100), nullable=True),
+    sa.Column('yearly_bookings_json', sa.JSON(), nullable=True),
     sa.ForeignKeyConstraint(['model_id'], ['sarimax_models.id'], ),
     sa.PrimaryKeyConstraint('id')
     )

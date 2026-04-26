@@ -297,6 +297,7 @@ def compute_snapshot_kpis(
         "growth_rate":        growth,
         "expected_bookings":  expected,
         "peak_travel_period": peak_period,
+        "yearly_bookings":      yearly_bookings_list, 
     }
 
 
@@ -413,7 +414,7 @@ def persist_to_neon(
                 data_quality_pct=kpis["data_quality_pct"],
                 revenue_total=kpis["revenue_total"],
                 growth_rate=kpis["growth_rate"],
-                yearly_bookings_json=kpis["expected_bookings"],
+                yearly_bookings_json=kpis["yearly_bookings"],
                 expected_bookings=kpis["expected_bookings"],
                 peak_travel_period=kpis["peak_travel_period"],
             ))

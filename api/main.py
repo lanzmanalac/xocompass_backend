@@ -312,6 +312,9 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
         for row in cache_rows
     ]
 
+    raw_yearly = snapshot.yearly_bookings_json
+    yearly_bookings = raw_yearly if isinstance(raw_yearly, list) else []
+
     return DashboardStatsResponse(
         total_records=snapshot.total_records,
         data_quality_pct=snapshot.data_quality_pct,
@@ -321,7 +324,7 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
         peak_travel_period=snapshot.peak_travel_period,
         bookings_forecast=bookings_forecast,
 
-        yearly_bookings = snapshot.yearly_bookings_json or []
+        yearly_bookings=yearly_bookings,
     )
 
 
@@ -650,3 +653,22 @@ def delete_model(model_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"status": "success", "message": f"Model {model_id} permanently deleted."}
+
+from sqlalchemy import text
+
+@app.get("/_debug/db-truth")
+def debug_db_truth(db: Session = Depends(get_db)):
+    """Verifies which DB the app is actually reading from."""
+    result = db.execute(text("""
+        SELECT 
+            current_database() AS db_name,
+            inet_server_addr() AS server_ip,
+            (SELECT COUNT(*) FROM sarimax_models) AS model_count
+    """)).fetchone()
+    
+    return {
+        "connected_to_db": result[0],
+        "server_internal_ip": str(result[1]),
+        "models_found_in_this_db": result[2],
+        "is_using_neon": "neon.tech" in str(db.get_bind().url)
+    }

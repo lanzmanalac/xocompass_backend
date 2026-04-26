@@ -59,7 +59,7 @@ class ForecastGraphResponse(BaseModel):
 
 class YearlyBookingPoint(BaseModel):
     year: str
-    bookings: str
+    bookings: int
 
 class DashboardStatsResponse(BaseModel):
     total_records: int
