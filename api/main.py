@@ -320,6 +320,8 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
         expected_bookings=snapshot.expected_bookings,
         peak_travel_period=snapshot.peak_travel_period,
         bookings_forecast=bookings_forecast,
+
+        yearly_bookings = snapshot.yearly_bookings_json or []
     )
 
 

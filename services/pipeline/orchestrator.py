@@ -243,19 +243,47 @@ def compute_snapshot_kpis(
     All values are Python-native types (not NumPy scalars) for SQLAlchemy safety.
     """
     w           = step1["weekly_df"]
+    df_raw      = step1["df_raw"]
     forecast_df = step6["forecast_df"]
 
-    total_records  = int(len(w))
+    total_records  = int(len(df_raw))
+
     nonzero_weeks  = int((w["bookings_weekly"] > 0).sum())
     data_quality   = round(float(nonzero_weeks / total_records * 100), 1)
 
     avg_weekly     = float(w["bookings_weekly"].mean())
+
+
+    revenue_col = next((c for c in df_raw.columns if "net amount" in c.lower()), None) # hanap the net amount column in the uploaded csv file
+    if revenue_col:
+        clean_rev = df_raw[revenue_col].astype(str).str.replace(r'[^\d.]', '', regex=True) # cleans data to only include digits
+        clean_rev = pd.to_numeric(clean_rev, errors='coerce').fillna(0)
+        revenue_total = float(clean_rev.sum())
+    else:
+        revenue_total = float(w["bookings_weekly"].sum() * 4500)
+
     revenue_total  = round(avg_weekly * 4_500 * 52, 2)
 
-    # Growth rate: last 8 weeks vs. prior 8 weeks
-    recent  = float(w["bookings_weekly"].iloc[-8:].mean())
-    prior   = float(w["bookings_weekly"].iloc[-16:-8].mean())
-    growth  = round((recent - prior) / prior * 100, 1) if prior > 0 else 0.0
+    # yearly growth rate
+    if len(w) >= 104: 
+        recent_yr = float(w["bookings_weekly"].iloc[-52:].sum())
+        prior_yr  = float(w["bookings_weekly"].iloc[-104:-52].sum())
+        growth  = round((recent_yr - prior_yr) / prior_yr * 100, 1) if prior_yr > 0 else 0.0
+    else:
+        # Fallback if the dataset is smaller than 2 years: Half-Year vs Prior Half-Year
+        recent_half = float(w["bookings_weekly"].iloc[-26:].sum())
+        prior_half  = float(w["bookings_weekly"].iloc[-52:-26].sum())
+        growth  = round((recent_half - prior_half) / prior_half * 100, 1) if prior_half > 0 else 0.0
+
+    # Exact Yearly Bookings from Raw Data
+    # Group by the exact year of the raw Booking_Date
+    yearly_counts = df_raw.groupby(df_raw["Booking_Date"].dt.year).size()
+    
+    # Format it exactly how the frontend expects it
+    yearly_bookings_list = [
+        {"year": str(int(year)), "bookings": int(count)}
+        for year, count in yearly_counts.items()
+    ]
 
     expected       = int(forecast_df["rounded"].sum())
     peak_idx       = forecast_df["forecast"].idxmax()
@@ -385,6 +413,7 @@ def persist_to_neon(
                 data_quality_pct=kpis["data_quality_pct"],
                 revenue_total=kpis["revenue_total"],
                 growth_rate=kpis["growth_rate"],
+                yearly_bookings_json=kpis["expected_bookings"],
                 expected_bookings=kpis["expected_bookings"],
                 peak_travel_period=kpis["peak_travel_period"],
             ))

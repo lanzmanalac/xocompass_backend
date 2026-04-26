@@ -82,6 +82,8 @@ class ForecastSnapshot(Base):
     expected_bookings = Column(Integer)
     peak_travel_period = Column(String(100))
 
+    yearly_bookings_json = Column(JSON, nullable= True)
+
 # 4. DIAGNOSTICS (Page 2 Technical Charts)
 class ModelDiagnostic(Base):
     __tablename__ = "model_diagnostics"
