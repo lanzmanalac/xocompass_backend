@@ -39,6 +39,14 @@ def seed_data():
         jarquebera_stat=1.87,
         jarquebera_pvalue=0.39,
         jarquebera_conclusion="Residuals are approximately normal around zero.",
+
+        correlation_json=[ 
+            {"variable": "holiday_lead_2", "correlation": 0.61},
+            {"variable": "is_long_weekend",  "correlation": 0.44},
+            {"variable": "typhoon_msw",      "correlation": -0.38},
+            {"variable": "holiday_intensity","correlation": 0.52},
+          ],
+
     )
 
     # 1. Mock Model Registry (The Brain)
@@ -102,6 +110,8 @@ def seed_data():
     )
     db.add(diag)
 
+    MOCK_RISK_FLAGS = ["HIGH", "MEDIUM", "LOW", "LOW"]
+
     # 5. Mock Forecast Cache (Page 1 Actual vs Predicted Graph)
     for i in range(4):
         future_date = now_ph + timedelta(weeks=i+1)
@@ -113,6 +123,7 @@ def seed_data():
             upper_bound=170.0 + (i * 10),
             generated_at=now_ph,
             periods_ahead=i+1
+            risk_flag=MOCK_RISK_FLAGS[i],  # ← NEW
         )
         db.add(cache)
 

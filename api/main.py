@@ -40,7 +40,9 @@ from api.schemas import (
     UploadResponse,
     BusinessAnalyticsResponse, DateCoverage,
     BookingsByYear, BookingsByMonth, HolidayBreakdown,
-
+    CriticalForecastWeek,
+    ForecastOutlookResponse,
+    CorrelationHeatmapPoint,
 )
 
 # ── IMPORT DATABASE ARCHITECTURE ──
@@ -484,7 +486,75 @@ def get_advanced_metrics(model_id: int, db: Session = Depends(get_db)):
             residuals=[ResidualPoint(**r) for r in (diag.residuals_json or [])],
             acf=_normalize_correlation_points(diag.acf_values_json),
             pacf=_normalize_correlation_points(diag.pacf_values_json),
+            correlation_heatmap=[              # ← NEW
+                CorrelationHeatmapPoint(**item)
+                for item in (diag.correlation_json or [])
+            ],
         )
+    )
+
+@app.get("/api/forecast-outlook/{model_id}", response_model=ForecastOutlookResponse)
+def get_forecast_outlook(model_id: int, db: Session = Depends(get_db)):
+    """
+    Tab 2: Single endpoint serving both KPI cards (Row 1) and the
+    Critical Forecast Weeks table (Row 3).
+
+    Single query on forecast_cache — all aggregation derived in Python
+    from the same list. Frontend makes one fetch call for the entire tab.
+
+    ISO 25010:
+      Performance Efficiency → Time Behavior:
+        1 DB query replaces 2. forecast_cache is indexed on model_id.
+        Python aggregation (sum, max over ≤16 rows) is O(n) negligible.
+      Reliability → Fault Tolerance:
+        Null risk_flag defaults to "MEDIUM" with a debug log trace.
+        Model existence is validated before any cache query.
+      Maintainability → Modifiability:
+        Risk logic is isolated to the for-loop below. When finalized,
+        only orchestrator.py (writer) and this loop (reader) change.
+        Schema and frontend are untouched.
+    """
+    model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
+
+    rows = (
+        db.query(ForecastCache)
+        .filter(ForecastCache.model_id == model_id)
+        .order_by(ForecastCache.forecast_date.asc())
+        .all()
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No forecast data found for this model."
+        )
+
+    # ── KPI derivations (same list, no second query) ──────────────────────
+    values = [r.predicted or 0.0 for r in rows]
+    forecasted_2w = int(sum(values[:2]))
+
+    peak_row = max(rows, key=lambda r: r.predicted or 0.0)
+
+    # ── Critical weeks table ──────────────────────────────────────────────
+    critical_weeks = []
+    for r in rows:
+        risk = r.risk_flag if r.risk_flag in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
+        if r.risk_flag is None:
+            logger.debug(
+                "forecast_cache id=%s has null risk_flag, defaulting to MEDIUM", r.id
+            )
+        critical_weeks.append(CriticalForecastWeek(
+            week_start=r.forecast_date,
+            forecasted_volume=int(r.predicted or 0),
+            risk_factor=risk,
+        ))
+
+    return ForecastOutlookResponse(
+        forecasted_bookings_2w=forecasted_2w,
+        highest_forecast_week_date=peak_row.forecast_date,
+        highest_forecast_week_value=int(peak_row.predicted or 0),
+        critical_weeks=critical_weeks,
     )
 
 @app.get("/api/historical-data", response_model=HistoricalDataResponse)

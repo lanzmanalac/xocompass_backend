@@ -74,7 +74,7 @@ class BusinessAnalyticsResponse(BaseModel):
     bookings_by_year: List[BookingsByYear]
     bookings_by_month: List[BookingsByMonth]
     holiday_breakdown: HolidayBreakdown
-    
+
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE 1: SIMPLIFIED METRICS (Executive Dashboard)
 # ════════════════════════════════════════════════════════════════════════════
@@ -158,17 +158,6 @@ class ModelTests(BaseModel):
     jarquebera_pvalue: float
     jarquebera_conclusion: str  # ADD THIS
 
-class AdvancedCharts(BaseModel):
-    residuals: List[ResidualPoint] = Field(default_factory=list)
-    acf: List[CorrelationPoint] = Field(default_factory=list)
-    pacf: List[CorrelationPoint] = Field(default_factory=list)
-
-class AdvancedMetricsResponse(BaseModel):
-    model_params: ModelParams
-    statistics: ModelStatistics
-    statistical_tests: ModelTests
-    charts: AdvancedCharts
-
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE 3: TIME SERIES LAB (Data & Retraining)
 # ════════════════════════════════════════════════════════════════════════════
@@ -199,3 +188,57 @@ class ForecastRequest(BaseModel):
 
 class ModelRenameRequest(BaseModel):
     new_model_name: str
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2: FORECAST & ACTIONS
+# Endpoint: reuses GET /api/forecast-graph/{model_id} for the demand graph
+#           and GET /api/strategic-actions/{model_id} for actions table.
+#           Two new computed schemas below for the summary cards + critical weeks.
+# ════════════════════════════════════════════════════════════════════════════
+
+class CriticalForecastWeek(BaseModel):
+    week_start: datetime
+    forecasted_volume: int
+    risk_factor: str  # "HIGH" | "MEDIUM" | "LOW"
+
+class ForecastOutlookResponse(BaseModel):
+    """
+    Tab 2: All forecast-derived data in a single response.
+    One DB round-trip. No partial-load states on the frontend.
+
+    ISO 25010:
+      Performance Efficiency → Time Behavior:
+        Single query on forecast_cache replaces two separate HTTP calls.
+        All aggregation (sum, max) runs in Python over the already-fetched
+        list — no second DB round-trip needed.
+      Maintainability → Modularity:
+        Frontend Tab 2 has exactly one data dependency for its KPI cards
+        AND its critical weeks table. One loading state, one error boundary.
+    """
+    forecasted_bookings_2w: int
+    highest_forecast_week_date: datetime
+    highest_forecast_week_value: int
+    critical_weeks: List[CriticalForecastWeek]
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3: ADVANCED METRICS — extends existing AdvancedMetricsResponse
+# New field: correlation_heatmap added to AdvancedCharts.
+# ════════════════════════════════════════════════════════════════════════════
+
+class CorrelationHeatmapPoint(BaseModel):
+    variable: str
+    correlation: float
+
+# AdvancedCharts already exists — we need to ADD correlation_heatmap to it.
+# Replace the existing AdvancedCharts class with this:
+class AdvancedCharts(BaseModel):
+    residuals: List[ResidualPoint] = Field(default_factory=list)
+    acf: List[CorrelationPoint] = Field(default_factory=list)
+    pacf: List[CorrelationPoint] = Field(default_factory=list)
+    correlation_heatmap: List[CorrelationHeatmapPoint] = Field(default_factory=list)
+
+class AdvancedMetricsResponse(BaseModel):
+    model_params: ModelParams
+    statistics: ModelStatistics
+    statistical_tests: ModelTests
+    charts: AdvancedCharts

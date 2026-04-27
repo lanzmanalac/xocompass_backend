@@ -112,6 +112,9 @@ class ModelDiagnostic(Base):
     acf_values_json = Column(JSON)
     pacf_values_json = Column(JSON)
 
+    correlation_json = Column(JSON, nullable=True)
+
+
     # ADF
     adf_stat = Column(Float)
     adf_pvalue = Column(Float)
@@ -141,3 +144,4 @@ class ForecastCache(Base):
 
     generated_at = Column(DateTime(timezone=True), default=get_ph_now)
     periods_ahead = Column(Integer)
+    risk_flag = Column(String(10), nullable=True)
