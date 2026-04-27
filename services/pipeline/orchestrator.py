@@ -36,7 +36,6 @@ from domain.models import (
     SarimaxModel,
     ModelDiagnostic,
     ForecastCache,
-    ForecastSnapshot,
     TrainingDataLog,
 )
 
@@ -98,7 +97,11 @@ def export_db_to_csv(csv_path: Path = EXPORT_CSV) -> str:
     print(f"   ✅ Exported {len(rows):,} transaction rows "
           f"({len(records)} weekly buckets) → {csv_path}")
     print(f"   💰 Net Amount column included: {has_revenue}")
-    return str(csv_path)
+    latest_batch_id = None
+    if records:
+        latest_batch_id = records[-1].ingestion_batch_id
+    print(f"   📦 Latest ingestion_batch_id: {latest_batch_id}")
+    return str(csv_path), latest_batch_id
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST-STEP 5: Model file persistence (File-First pattern)
@@ -369,6 +372,8 @@ def persist_to_neon(
                 train_start_date=step3["train_wk"].index.min().replace(tzinfo=ph_tz),
                 train_end_date=step3["train_wk"].index.max().replace(tzinfo=ph_tz),
                 created_at=datetime.now(ph_tz),
+                ingestion_batch_id=step1.get("ingestion_batch_id"),
+
             )
             db.add(new_model)
             db.flush()  # assigns new_model.id without committing the transaction
@@ -409,17 +414,13 @@ def persist_to_neon(
 
             # 5. Insert KPI snapshot for Page 1 dashboard cards
             kpis = compute_snapshot_kpis(step1, step6, model_id)
-            db.add(ForecastSnapshot(
-                model_id=model_id,
-                generated_at=datetime.now(ph_tz),
-                total_records=kpis["total_records"],
-                data_quality_pct=kpis["data_quality_pct"],
-                revenue_total=kpis["revenue_total"],
-                growth_rate=kpis["growth_rate"],
-                yearly_bookings_json=kpis["yearly_bookings"],
-                expected_bookings=kpis["expected_bookings"],
-                peak_travel_period=kpis["peak_travel_period"],
-            ))
+            new_model.total_records = kpis["total_records"]
+            new_model.data_quality_pct = kpis["data_quality_pct"]
+            new_model.revenue_total = kpis["revenue_total"]
+            new_model.growth_rate = kpis["growth_rate"]
+            new_model.yearly_bookings_json = kpis["yearly_bookings"]
+            new_model.expected_bookings = kpis["expected_bookings"]
+            new_model.peak_travel_period = kpis["peak_travel_period"]
 
             db.commit()  # ← single commit: all tables succeed or none do
             print(f"   ✅ All tables committed. model_id={model_id}")
@@ -483,10 +484,10 @@ if __name__ == "__main__":
     pipeline_cfg = build_pipeline_config(raw_config)
 
     # 2. Extract Data
-    csv_path = export_db_to_csv(EXPORT_CSV)
+    csv_path, latest_batch_id = export_db_to_csv(EXPORT_CSV)
     step1 = run_step1_data_ingestion(csv_path)
-
     step1["revenue_total"] = fetch_revenue_from_db()
+    step1["ingestion_batch_id"] = latest_batch_id
 
     # 3. INTERCEPT 1: Exogenous Filtering
     if not pipeline_cfg["use_exog"]:

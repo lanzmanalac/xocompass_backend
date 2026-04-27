@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 # Added engine and Base to the imports
 from repository.model_repository import SessionLocal, engine
-from domain.models import Base, SarimaxModel, TrainingDataLog, ForecastSnapshot, ModelDiagnostic, ForecastCache
+from domain.models import Base, SarimaxModel, TrainingDataLog, ModelDiagnostic, ForecastCache
 
 def seed_data():
     # 0. THE FIX: Force SQLAlchemy to build the tables if they are missing
@@ -77,17 +77,19 @@ def seed_data():
         db.add(log)
 
     # 3. Mock Snapshot (Page 1 KPIs)
-    snapshot = ForecastSnapshot(
-        model_id=mock_model.id,
-        generated_at=now_ph,
-        total_records=104,
-        data_quality_pct=98.5,
-        revenue_total=2450000.00,
-        growth_rate=12.5,
-        expected_bookings=450,
-        peak_travel_period="April - May 2026"
-    )
-    db.add(snapshot)
+    # Write KPI columns directly onto the model row (no separate snapshot table)
+    mock_model.total_records = 104
+    mock_model.data_quality_pct = 98.5
+    mock_model.revenue_total = 2450000.00
+    mock_model.growth_rate = 12.5
+    mock_model.expected_bookings = 450
+    mock_model.peak_travel_period = "April - May 2026"
+    mock_model.yearly_bookings_json = [
+        {"year": "2023", "bookings": 312},
+        {"year": "2024", "bookings": 401},
+        {"year": "2025", "bookings": 450},
+    ]
+    db.commit()
 
     # 4. Mock Diagnostics (Page 2 MLOps Charts)
     diag = ModelDiagnostic(

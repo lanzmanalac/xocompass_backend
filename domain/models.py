@@ -45,7 +45,7 @@ class SarimaxModel(Base):
     train_start_date = Column(DateTime(timezone=True))
     train_end_date = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=get_ph_now)
-
+    ingestion_batch_id = Column(String(36), nullable=True)
     # Relationships
     diagnostics = relationship("ModelDiagnostic", back_populates="model", uselist=False)
 
@@ -62,7 +62,9 @@ class TrainingDataLog(Base):
     is_holiday = Column(Boolean, default=False)
     weather_indicator = Column(Float, nullable=True) # typhoon_msw
 
-    weekly_revenue = Column(Float, nullable=True)        # ← add this
+    weekly_revenue = Column(Float, nullable=True)
+    ingestion_batch_id = Column(String(36), nullable=True)
+
 
     additional_exog_json = Column(JSON, nullable=True)
     # additional_exog_json is a JSON column that can store any additional exogenous features 
@@ -73,19 +75,31 @@ class TrainingDataLog(Base):
     
     
 # 3. KPI SNAPSHOTS (Page 1 Dashboard Cards)
-class ForecastSnapshot(Base):
-    __tablename__ = "forecast_snapshots"
-    id = Column(Integer, primary_key=True)
-    model_id = Column(Integer, ForeignKey("sarimax_models.id"))
-    generated_at = Column(DateTime(timezone=True), default=get_ph_now)
-    total_records = Column(Integer)
-    data_quality_pct = Column(Float)
-    revenue_total = Column(Float)
-    growth_rate = Column(Float)
-    expected_bookings = Column(Integer)
-    peak_travel_period = Column(String(100))
+class DatasetSnapshot(Base):
+    __tablename__ = "dataset_snapshots"
 
-    yearly_bookings_json = Column(JSON, nullable= True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ingestion_batch_id = Column(String(36), nullable=False, unique=True)
+    generated_at = Column(DateTime(timezone=True), default=get_ph_now)
+
+    total_transaction_count = Column(Integer)
+    total_weekly_records = Column(Integer)
+    total_revenue = Column(Float, nullable=True)
+
+    data_start_date = Column(DateTime(timezone=True))
+    data_end_date = Column(DateTime(timezone=True))
+    span_weeks = Column(Integer)
+
+    avg_weekly_bookings = Column(Float)
+    peak_week_date = Column(DateTime(timezone=True))
+    peak_week_bookings = Column(Integer)
+    growth_rate = Column(Float)
+
+    bookings_by_year_json = Column(JSON)
+    bookings_by_month_json = Column(JSON)
+
+    holiday_week_count = Column(Integer)
+    non_holiday_week_count = Column(Integer)
 
 # 4. DIAGNOSTICS (Page 2 Technical Charts)
 class ModelDiagnostic(Base):

@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # 1. IMPORT YOUR NEW 5-TABLE ARCHITECTURE
-from domain.models import Base, SarimaxModel, ForecastSnapshot, ModelDiagnostic, ForecastCache, TrainingDataLog
+from domain.models import Base, SarimaxModel, ModelDiagnostic, ForecastCache, TrainingDataLog
 
 load_dotenv()
 # URL from .env (Neon DB)

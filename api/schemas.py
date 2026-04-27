@@ -38,6 +38,44 @@ class UploadResponse(BaseModel):
     new_records: int
 
 # ════════════════════════════════════════════════════════════════════════════
+# TAB 1: BUSINESS ANALYTICS
+# Endpoint: GET /api/business-analytics
+# Source:   business_analytics_snapshots (dataset-scoped, no model_id)
+# ════════════════════════════════════════════════════════════════════════════
+
+class DateCoverage(BaseModel):
+    start_date: datetime
+    end_date: datetime
+    span_weeks: int
+
+class BookingsByYear(BaseModel):
+    year: str
+    bookings: int
+
+class BookingsByMonth(BaseModel):
+    month: str      # format: "2023-01"
+    bookings: int
+
+class HolidayBreakdown(BaseModel):
+    holiday_weeks: int
+    non_holiday_weeks: int
+    holiday_pct: float
+
+class BusinessAnalyticsResponse(BaseModel):
+    generated_at: datetime
+    total_transaction_count: int
+    total_weekly_records: int
+    total_revenue: Optional[float]
+    avg_weekly_bookings: float
+    peak_week_date: datetime
+    peak_week_bookings: int
+    growth_rate: float
+    date_coverage: DateCoverage
+    bookings_by_year: List[BookingsByYear]
+    bookings_by_month: List[BookingsByMonth]
+    holiday_breakdown: HolidayBreakdown
+    
+# ════════════════════════════════════════════════════════════════════════════
 # PAGE 1: SIMPLIFIED METRICS (Executive Dashboard)
 # ════════════════════════════════════════════════════════════════════════════
 class ChartPoint(BaseModel):

@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from typing import Optional
 
 from services.ingestion_service import ingest_csv
 
@@ -37,11 +38,14 @@ from api.schemas import (
     HealthResponse,
     DatabaseHealthResponse,
     UploadResponse,
+    BusinessAnalyticsResponse, DateCoverage,
+    BookingsByYear, BookingsByMonth, HolidayBreakdown,
+
 )
 
 # ── IMPORT DATABASE ARCHITECTURE ──
 from repository.model_repository import SessionLocal
-from domain.models import SarimaxModel, ForecastSnapshot, ModelDiagnostic, TrainingDataLog, ForecastCache
+from domain.models import SarimaxModel, DatasetSnapshot, ModelDiagnostic, TrainingDataLog, ForecastCache
 
 load_dotenv()
 
@@ -288,11 +292,17 @@ def get_model_registry(db: Session = Depends(get_db)):
 @app.get("/api/dashboard-stats/{model_id}", response_model=DashboardStatsResponse)
 def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
     """Page 1: Returns the fast snapshot metrics for the dashboard."""
-    snapshot = db.query(ForecastSnapshot).filter(ForecastSnapshot.model_id == model_id).first()
-    
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Snapshot not found for this model.")
-        # Pull real forecast data from ForecastCache — no hardcoding
+    model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
+
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found.")
+
+    if model.total_records is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Snapshot not found for this model."
+        )
+
     cache_rows = (
         db.query(ForecastCache)
         .filter(ForecastCache.model_id == model_id)
@@ -312,21 +322,118 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
         for row in cache_rows
     ]
 
-    raw_yearly = snapshot.yearly_bookings_json
+    raw_yearly = model.yearly_bookings_json
     yearly_bookings = raw_yearly if isinstance(raw_yearly, list) else []
 
     return DashboardStatsResponse(
-        total_records=snapshot.total_records,
-        data_quality_pct=snapshot.data_quality_pct,
-        revenue_total=snapshot.revenue_total,
-        growth_rate=snapshot.growth_rate,
-        expected_bookings=snapshot.expected_bookings,
-        peak_travel_period=snapshot.peak_travel_period,
+        total_records=model.total_records,
+        data_quality_pct=model.data_quality_pct or 0.0,
+        revenue_total=model.revenue_total or 0.0,
+        growth_rate=model.growth_rate or 0.0,
+        expected_bookings=model.expected_bookings or 0,
+        peak_travel_period=model.peak_travel_period or "",
         bookings_forecast=bookings_forecast,
-
         yearly_bookings=yearly_bookings,
     )
 
+@app.get("/api/business-analytics", response_model=BusinessAnalyticsResponse)
+def get_business_analytics(
+    model_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Tab 1: Business Analytics.
+
+    Behavior:
+      - If model_id is provided: returns the dataset snapshot for the
+        dataset that specific model was trained on. Selecting Model #1
+        always shows Model #1's training data, not the latest upload.
+      - If no model_id: returns the most recent dataset snapshot
+        (reflects the current uploaded data).
+
+    ISO 25010:
+      Performance Efficiency → Time Behavior:
+        Single SELECT on dataset_snapshots. No aggregation on request path.
+      Maintainability → Modularity:
+        Zero coupling to ML pipeline internals.
+      Reliability → Maturity:
+        Works even when zero models are trained (no model_id path).
+        Dataset history is preserved across multiple uploads.
+    """
+    if model_id is not None:
+        model = db.query(SarimaxModel).filter(
+            SarimaxModel.id == model_id
+        ).first()
+        if not model:
+            raise HTTPException(
+                status_code=404,
+                detail={"message": f"Model {model_id} not found.", "details": []},
+            )
+        if not model.ingestion_batch_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": f"Model {model_id} has no linked dataset.",
+                    "details": [
+                        "This model was trained before dataset tracking was introduced.",
+                        "Retrain the model to link it to a dataset snapshot."
+                    ],
+                },
+            )
+        snapshot = db.query(DatasetSnapshot).filter(
+            DatasetSnapshot.ingestion_batch_id == model.ingestion_batch_id
+        ).first()
+    else:
+        snapshot = (
+            db.query(DatasetSnapshot)
+            .order_by(DatasetSnapshot.generated_at.desc())
+            .first()
+        )
+
+    if not snapshot:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "No dataset snapshot found.",
+                "details": [
+                    "Upload a CSV via POST /api/upload to generate this data."
+                ],
+            },
+        )
+
+    total_weeks = snapshot.total_weekly_records or 1
+    holiday_pct = round(
+        (snapshot.holiday_week_count or 0) / total_weeks * 100, 1
+    )
+
+    return BusinessAnalyticsResponse(
+        generated_at=snapshot.generated_at,
+        total_transaction_count=snapshot.total_transaction_count or 0,
+        total_weekly_records=snapshot.total_weekly_records or 0,
+        total_revenue=snapshot.total_revenue,
+        avg_weekly_bookings=snapshot.avg_weekly_bookings or 0.0,
+        peak_week_date=snapshot.peak_week_date,
+        peak_week_bookings=snapshot.peak_week_bookings or 0,
+        growth_rate=snapshot.growth_rate or 0.0,
+        date_coverage=DateCoverage(
+            start_date=snapshot.data_start_date,
+            end_date=snapshot.data_end_date,
+            span_weeks=snapshot.span_weeks or 0,
+        ),
+        bookings_by_year=[
+            BookingsByYear(**item)
+            for item in (snapshot.bookings_by_year_json or [])
+        ],
+        bookings_by_month=[
+            BookingsByMonth(**item)
+            for item in (snapshot.bookings_by_month_json or [])
+        ],
+        holiday_breakdown=HolidayBreakdown(
+            holiday_weeks=snapshot.holiday_week_count or 0,
+            non_holiday_weeks=snapshot.non_holiday_week_count or 0,
+            holiday_pct=holiday_pct,
+        ),
+    )
 
 @app.get("/api/advanced-metrics/{model_id}",
          response_model=AdvancedMetricsResponse)
@@ -609,7 +716,7 @@ def trigger_retrain(
         new_records_used=db.query(TrainingDataLog).count()
     )
 
-from api.schemas import ModelRenameRequest # Make sure this is in your imports!
+from api.schemas import ModelRenameRequest 
 
 # ── 1. RENAME ENDPOINT ──
 @app.patch("/api/models/{model_id}/rename")
@@ -673,3 +780,4 @@ def debug_db_truth(db: Session = Depends(get_db)):
         "is_using_neon": "neon.tech" in str(db.get_bind().url)
     }
 
+    

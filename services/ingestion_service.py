@@ -5,9 +5,15 @@ from sqlalchemy.orm import Session
 from domain.models import TrainingDataLog
 from core.exogenous import PHHolidayEngine
 from zoneinfo import ZoneInfo
+from services.analytics_service import compute_and_persist_dataset_snapshot
+import uuid
+
 
 def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     ph_tz = ZoneInfo("Asia/Manila")
+
+    ingestion_batch_id = str(uuid.uuid4())
+
 
     db.query(TrainingDataLog).delete()
     db.commit()
@@ -99,10 +105,15 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
             weather_indicator=0.0,
             weekly_revenue=float(row["weekly_revenue"]) if row.get("weekly_revenue") is not None else None,
             additional_exog_json={"is_long_weekend": int(is_lw)},
+            ingestion_batch_id=ingestion_batch_id,
         ))
 
     # 6. Save to Neon
     db.add_all(db_rows)
+    db.flush()
+    # atomically rebuild the business analytics snapshot alongside the data write
+    compute_and_persist_dataset_snapshot(db, ingestion_batch_id)
+
     db.commit()
     
     total_rev = float(weekly.loc[weekly["week"].isin(new_rows["week"]), "weekly_revenue"].sum())
@@ -113,4 +124,5 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
         "message": f"Ingested {len(db_rows)} new weekly records.",
         "new_records": len(db_rows),
         "revenue_total": total_revenue,
+        "ingestion_batch_id": ingestion_batch_id,
     }
