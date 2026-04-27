@@ -40,6 +40,7 @@ from api.schemas import (
     UploadResponse,
     BusinessAnalyticsResponse, DateCoverage,
     BookingsByYear, BookingsByMonth, HolidayBreakdown,
+    LeadTimeBucket, AirlineCount,
     CriticalForecastWeek,
     ForecastOutlookResponse,
     CorrelationHeatmapPoint,
@@ -434,6 +435,15 @@ def get_business_analytics(
             non_holiday_weeks=snapshot.non_holiday_week_count or 0,
             holiday_pct=holiday_pct,
         ),
+        avg_lead_time_days=snapshot.avg_lead_time_days,
+        lead_time_distribution=[
+            LeadTimeBucket(**item)
+            for item in (snapshot.lead_time_distribution_json or [])
+        ],
+        top_airlines=[
+            AirlineCount(**item)
+            for item in (snapshot.top_airlines_json or [])
+        ],
     )
 
 @app.get("/api/advanced-metrics/{model_id}",

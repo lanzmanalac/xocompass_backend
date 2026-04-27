@@ -61,6 +61,15 @@ class HolidayBreakdown(BaseModel):
     non_holiday_weeks: int
     holiday_pct: float
 
+class LeadTimeBucket(BaseModel):
+    bucket: str     # "0-7 days", "8-14 days", etc.
+    count: int
+
+class AirlineCount(BaseModel):
+    airline_code: str
+    count: int
+    pct: float
+
 class BusinessAnalyticsResponse(BaseModel):
     generated_at: datetime
     total_transaction_count: int
@@ -74,6 +83,11 @@ class BusinessAnalyticsResponse(BaseModel):
     bookings_by_year: List[BookingsByYear]
     bookings_by_month: List[BookingsByMonth]
     holiday_breakdown: HolidayBreakdown
+
+    avg_lead_time_days: Optional[float] = None
+    lead_time_distribution: List[LeadTimeBucket] = []
+    top_airlines: List[AirlineCount] = []
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # PAGE 1: SIMPLIFIED METRICS (Executive Dashboard)

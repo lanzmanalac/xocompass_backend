@@ -34,6 +34,9 @@ PH_TZ = ZoneInfo("Asia/Manila")
 def compute_and_persist_dataset_snapshot(
     db: Session,
     ingestion_batch_id: str,
+    avg_lead_time_days: float | None = None,
+    lead_time_distribution: list | None = None,
+    top_airlines: list | None = None,
 ) -> DatasetSnapshot:
     """
     Aggregates all training_data_log rows for the given ingestion_batch_id
@@ -136,6 +139,10 @@ def compute_and_persist_dataset_snapshot(
         bookings_by_month_json=bookings_by_month,
         holiday_week_count=holiday_week_count,
         non_holiday_week_count=non_holiday_week_count,
+        avg_lead_time_days=avg_lead_time_days,           # ← new
+        lead_time_distribution_json=lead_time_distribution,  # ← new
+        top_airlines_json=top_airlines,                  # ← new
+
     )
     db.add(snapshot)
 

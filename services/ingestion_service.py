@@ -44,6 +44,90 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     df['date'] = pd.to_datetime(df[date_col], format='mixed', dayfirst=False, errors='coerce')
     df = df.dropna(subset=['date'])
 
+    # ── Detect Travel Date column ─────────────────────────────────────────
+    travel_col = next(
+        (c for c in df.columns if 'travel' in c.lower() and 'date' in c.lower()),
+        None,
+    )
+    print(f"   Travel date column detected: {repr(travel_col)}")
+
+    # ── Detect Airline Code column ────────────────────────────────────────
+    airline_col = next(
+        (c for c in df.columns if 'airline' in c.lower()),
+        None,
+    )
+    print(f"   Airline column detected: {repr(airline_col)}")
+
+    # ── Compute Lead Time (raw transaction level) ─────────────────────────
+    # Lead time = how many days BEFORE travel date the customer booked.
+    # Computed here from raw rows before weekly aggregation loses this info.
+    avg_lead_time_days = None
+    lead_time_distribution = None
+
+    if travel_col:
+        df['travel_date'] = pd.to_datetime(
+            df[travel_col], format='mixed', dayfirst=False, errors='coerce'
+        )
+        df['lead_time'] = (df['travel_date'] - df['date']).dt.days
+
+        # Only keep positive lead times (negative = data error)
+        valid_lead = df['lead_time'].dropna()
+        valid_lead = valid_lead[valid_lead >= 0]
+
+        if len(valid_lead) > 0:
+            avg_lead_time_days = round(float(valid_lead.mean()), 1)
+
+            # Pre-bucket into histogram bins — server-side so frontend
+            # just renders bars. ISO 25010 → Performance Efficiency.
+            bins = [
+                (0,   7,   "0-7 days"),
+                (8,   14,  "8-14 days"),
+                (15,  30,  "15-30 days"),
+                (31,  60,  "31-60 days"),
+                (61,  90,  "61-90 days"),
+                (91,  float('inf'), "90+ days"),
+            ]
+            lead_time_distribution = []
+            for low, high, label in bins:
+                count = int(((valid_lead >= low) & (valid_lead <= high)).sum())
+                lead_time_distribution.append({
+                    "bucket": label,
+                    "count": count,
+                })
+
+            print(f"   ⏱️  Avg lead time: {avg_lead_time_days} days "
+                  f"({len(valid_lead):,} valid transactions)")
+        else:
+            print("   ⚠️  No valid lead time data found.")
+    else:
+        print("   ⚠️  No travel date column — lead time will not be computed.")
+
+    # ── Compute Top Airlines (raw transaction level) ──────────────────────
+    top_airlines = None
+
+    if airline_col:
+        airline_counts = (
+            df[airline_col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .value_counts()
+            .head(7)
+        )
+        total_with_airline = int(airline_counts.sum())
+        top_airlines = [
+            {
+                "airline_code": code,
+                "count": int(count),
+                "pct": round(float(count) / total_with_airline * 100, 1)
+                if total_with_airline > 0 else 0.0,
+            }
+            for code, count in airline_counts.items()
+        ]
+        print(f"   ✈️  Top airlines: {[a['airline_code'] for a in top_airlines]}")
+    else:
+        print("   ⚠️  No airline column — top airlines will not be computed.")
+
     # 2. Group into Weekly Buckets
     df["week"] = df["date"].dt.to_period("W-MON").dt.start_time
 
@@ -112,7 +196,13 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     db.add_all(db_rows)
     db.flush()
     # atomically rebuild the business analytics snapshot alongside the data write
-    compute_and_persist_dataset_snapshot(db, ingestion_batch_id)
+    compute_and_persist_dataset_snapshot(
+        db,
+        ingestion_batch_id,
+        avg_lead_time_days=avg_lead_time_days,
+        lead_time_distribution=lead_time_distribution,
+        top_airlines=top_airlines,
+    )
 
     db.commit()
     
@@ -125,4 +215,5 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
         "new_records": len(db_rows),
         "revenue_total": total_revenue,
         "ingestion_batch_id": ingestion_batch_id,
+        "avg_lead_time_days": avg_lead_time_days,
     }

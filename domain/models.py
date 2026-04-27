@@ -101,6 +101,12 @@ class DatasetSnapshot(Base):
     holiday_week_count = Column(Integer)
     non_holiday_week_count = Column(Integer)
 
+    # Lead time analytics — computed from raw CSV at ingestion time
+    avg_lead_time_days = Column(Float, nullable=True)
+    lead_time_distribution_json = Column(JSON, nullable=True)  # pre-bucketed histogram
+    top_airlines_json = Column(JSON, nullable=True)            # top 5-7 airlines by count
+
+
 # 4. DIAGNOSTICS (Page 2 Technical Charts)
 class ModelDiagnostic(Base):
     __tablename__ = "model_diagnostics"
