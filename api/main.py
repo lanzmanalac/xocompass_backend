@@ -57,25 +57,6 @@ DEFAULT_CORS_ORIGINS = (
     "https://xocompass.vercel.app",
 )
 
-# At the top of api/main.py or in a startup hook:
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-from alembic.runtime.migration import MigrationContext
-from alembic.operations import Operations
-
-def run_migrations():
-    """Auto-run pending migrations at startup."""
-    alembic_cfg = Config("alembic.ini")
-    alembic_cfg.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL"))
-    
-    with engine.begin() as connection:
-        alembic_cfg.attributes['connection'] = connection
-        command.upgrade(alembic_cfg, 'head')
-
-# Call this before starting the app
-if __name__ == "__main__":
-    run_migrations()
-
 def _load_cors_origins() -> list[str]:
     raw_origins = os.getenv("CORS_ALLOWED_ORIGINS")
     if raw_origins is None:
