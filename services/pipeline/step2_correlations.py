@@ -84,6 +84,18 @@ def run_step2_correlations(step1):
         plt.suptitle("Step 2 — Preliminary Lag Structure (No Log Transform)",
                      fontweight="bold", y=1.02)
         plt.tight_layout(); plt.show()
+# ── NEW: Format the correlations for the database & frontend API ──
+    correlation_heatmap = []
+    for var, r in target_corr.items():
+        # Skip NaNs
+        if r is not None and not (isinstance(r, float) and (r != r)):
+            correlation_heatmap.append({
+                "variable": str(var),
+                "correlation": round(float(r), 4)
+            })
 
     print(f"\n✅ Step 2 complete.")
-    return {"corr_matrix": corr_matrix}
+    return {
+        "corr_matrix": corr_matrix,
+        "correlation_heatmap": correlation_heatmap # <-- Added this!
+    }

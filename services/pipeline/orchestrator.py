@@ -316,6 +316,7 @@ def compute_snapshot_kpis(
 def persist_to_neon(
     model_path: Path,
     step1: dict,
+    step2: dict,
     step3: dict,
     step5: dict,
     step6: dict,
@@ -385,6 +386,7 @@ def persist_to_neon(
                 residuals_json=residuals,
                 acf_values_json=acf_out,
                 pacf_values_json=pacf_out,
+                correlation_json=step2["correlation_heatmap"],
                 adf_stat=adf_stat,
                 adf_pvalue=adf_p,
                 adf_conclusion=adf_conc,
@@ -514,5 +516,5 @@ if __name__ == "__main__":
     # 7. Pass dynamic steps to Eval
     step6 = run_step6_evaluation(step1, step3, step5, forecast_steps=pipeline_cfg["forecast_steps"])
     
-    model_id = persist_to_neon(model_path, step1, step3, step5, step6)
+    model_id = persist_to_neon(model_path, step1, step2, step3, step5, step6)
     print(f"\n   Pipeline complete. model_id = {model_id}")
