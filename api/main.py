@@ -814,32 +814,29 @@ def rename_model(model_id: int, request: ModelRenameRequest, db: Session = Depen
 
 
 # ── 2. DELETE ENDPOINT (Safe Deletion) ──
+import os
+
 @app.delete("/api/models/{model_id}")
 def delete_model(model_id: int, db: Session = Depends(get_db)):
-    """Page 2: Deletes a model from the registry, its dependencies, and the server disk."""
+    # 1. Find the model
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
-    
     if not model:
-        raise HTTPException(status_code=404, detail="Model not found.")
-    
-    # STEP A: Physically remove the .joblib file from the server so we don't run out of storage
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # 2. Physically delete the .joblib file from your Mac/Server so it doesn't clog storage
     if model.model_path and os.path.exists(model.model_path):
         try:
             os.remove(model.model_path)
         except Exception as e:
-            logger.warning(f"Could not delete physical file at {model.model_path}. Error: {e}")
+            print(f"Warning: Could not delete model file {model.model_path}: {e}")
 
-    # STEP B: Clear Foreign Key dependencies so Postgres doesn't crash
-    db.query(ModelDiagnostic).filter(ModelDiagnostic.model_id == model_id).delete()
-    db.query(ForecastCache).filter(ForecastCache.model_id == model_id).delete()
-    db.query(ForecastSnapshot).filter(ForecastSnapshot.model_id == model_id).delete()
-
-    # STEP C: Finally, delete the model itself
+    # 3. Nuke the model from the database
+    # (Because of cascade="all, delete-orphan" in models.py, this single line 
+    # automatically destroys the associated ModelDiagnostic and ForecastCache records too!)
     db.delete(model)
     db.commit()
-    
-    return {"status": "success", "message": f"Model {model_id} permanently deleted."}
 
+    return {"message": f"Model {model_id} and all its data were successfully obliterated."}
 from sqlalchemy import text
 
 @app.get("/_debug/db-truth")

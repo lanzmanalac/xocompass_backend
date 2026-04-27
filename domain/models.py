@@ -47,8 +47,9 @@ class SarimaxModel(Base):
     created_at = Column(DateTime(timezone=True), default=get_ph_now)
     ingestion_batch_id = Column(String(36), nullable=True)
     # Relationships
-    diagnostics = relationship("ModelDiagnostic", back_populates="model", uselist=False)
-
+    # Tell the database to destroy the child records when the parent is deleted
+    diagnostics = relationship("ModelDiagnostic", back_populates="model", uselist=False, cascade="all, delete-orphan")
+    forecasts = relationship("ForecastCache", backref="model", cascade="all, delete-orphan")
 # 2. THE LEDGER (Page 3 History & Uploads)
 class TrainingDataLog(Base):
     __tablename__ = "training_data_log"
