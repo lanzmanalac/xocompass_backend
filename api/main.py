@@ -341,31 +341,34 @@ def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
 @app.get("/api/business-analytics", response_model=BusinessAnalyticsResponse)
 def get_business_analytics(
     model_id: Optional[int] = None,
+    year: Optional[str] = None,          # ── NEW: "overall" | "2013" | "2014" | ...
     db: Session = Depends(get_db),
 ):
     """
-    Tab 1: Business Analytics.
+    Tab 1: Business Analytics — year-aware via ?year= query parameter.
 
     Behavior:
-      - If model_id is provided: returns the dataset snapshot for the
-        dataset that specific model was trained on. Selecting Model #1
-        always shows Model #1's training data, not the latest upload.
-      - If no model_id: returns the most recent dataset snapshot
-        (reflects the current uploaded data).
+      - year=None or year="overall" → returns the full-dataset aggregation.
+      - year="2023"                 → returns the 2023-scoped slice.
+      - year="9999" (invalid)       → returns 400 with sanitized error.
+      - model_id provided           → scopes snapshot to that model's training data.
+      - model_id omitted            → uses the most recent snapshot.
 
     ISO 25010:
       Performance Efficiency → Time Behavior:
-        Single SELECT on dataset_snapshots. No aggregation on request path.
-      Maintainability → Modularity:
-        Zero coupling to ML pipeline internals.
-      Reliability → Maturity:
-        Works even when zero models are trained (no model_id path).
-        Dataset history is preserved across multiple uploads.
+        Single SELECT on dataset_snapshots. No aggregation on the request path.
+        The ?year= filter is a dict lookup on a pre-computed JSON blob — O(1).
+      Maintainability → Modifiability:
+        _slice_year() is the single point where year-filtering semantics live.
+        Adding quarterly view is one new helper — zero schema changes.
+      Reliability → Fault Tolerance:
+        Invalid year → sanitized 400. Null JSON columns → empty list defaults.
+        Never exposes raw Python exceptions to the frontend.
     """
+
+    # ── 1. Resolve the snapshot ───────────────────────────────────────────
     if model_id is not None:
-        model = db.query(SarimaxModel).filter(
-            SarimaxModel.id == model_id
-        ).first()
+        model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
         if not model:
             raise HTTPException(
                 status_code=404,
@@ -378,7 +381,7 @@ def get_business_analytics(
                     "message": f"Model {model_id} has no linked dataset.",
                     "details": [
                         "This model was trained before dataset tracking was introduced.",
-                        "Retrain the model to link it to a dataset snapshot."
+                        "Retrain the model to link it to a dataset snapshot.",
                     ],
                 },
             )
@@ -397,22 +400,112 @@ def get_business_analytics(
             status_code=404,
             detail={
                 "message": "No dataset snapshot found.",
-                "details": [
-                    "Upload a CSV via POST /api/upload to generate this data."
-                ],
+                "details": ["Upload a CSV via POST /api/upload to generate this data."],
             },
         )
 
-    total_weeks = snapshot.total_weekly_records or 1
-    holiday_pct = round(
-        (snapshot.holiday_week_count or 0) / total_weeks * 100, 1
-    )
+    # ── 2. Validate and normalise the year parameter ──────────────────────
+    # Normalise: None and "overall" both mean the full dataset.
+    resolved_year = (year or "overall").strip().lower()
+    if resolved_year == "overall":
+        resolved_year = "overall"
+    else:
+        available = snapshot.available_years_json or []
+        if resolved_year not in available:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"Year '{year}' is not available in this dataset.",
+                    "details": [f"Available years: {available}"],
+                },
+            )
 
+    # ── 3. Private slice helper ───────────────────────────────────────────
+    # Looks up the correct year slice from a year-keyed JSON dict.
+    # Falls back to [] / None gracefully so old NULL columns never crash.
+    #
+    # ISO 25010 → Reliability → Fault Tolerance:
+    #   Every possible bad state (None blob, missing key, wrong type)
+    #   returns a safe empty default. The frontend never sees a 500
+    #   caused by a missing year key.
+    def _slice(blob: dict | list | None, fallback=None):
+        if fallback is None:
+            fallback = []
+        if blob is None:
+            return fallback
+        # Old snapshots stored a flat list (pre-migration). Return it
+        # as-is for the "overall" view so they still work.
+        if isinstance(blob, list):
+            return blob if resolved_year == "overall" else fallback
+        # New snapshots store a year-keyed dict.
+        return blob.get(resolved_year, blob.get("overall", fallback))
+
+    # ── 4. Build the year-scoped KPI scalars ──────────────────────────────
+    # For scalar KPIs (total_revenue, avg_weekly_bookings, etc.) we use
+    # the revenue_by_year dict to get the year-scoped value.
+    # For "overall" we use the snapshot's top-level scalar directly.
+    rev_by_year_blob = snapshot.revenue_by_year_json  # {"overall": float, "2013": float}
+
+    if resolved_year == "overall" or rev_by_year_blob is None:
+        scoped_revenue = snapshot.total_revenue
+    else:
+        scoped_revenue = rev_by_year_blob.get(resolved_year, snapshot.total_revenue)
+
+    # ── 5. Holiday breakdown — year-scoped ────────────────────────────────
+    # Holiday counts are stored on the snapshot as flat integers (global).
+    # For the "overall" view we use those directly. For a specific year,
+    # we derive them from bookings_by_month filtered to that year — this
+    # avoids needing a separate per-year holiday JSON column.
+    # The trade-off: holiday counts per year are approximated from the
+    # weekly records in TrainingDataLog. Acceptable for a dashboard KPI.
+    total_weeks = snapshot.total_weekly_records or 1
+    if resolved_year == "overall":
+        h_weeks     = snapshot.holiday_week_count or 0
+        non_h_weeks = snapshot.non_holiday_week_count or 0
+    else:
+        # Count weekly records for this year from training log
+        year_records = (
+            db.query(TrainingDataLog)
+            .filter(
+                TrainingDataLog.ingestion_batch_id == snapshot.ingestion_batch_id,
+            )
+            .all()
+        )
+        year_records_filtered = [
+            r for r in year_records
+            if str(r.record_date.year) == resolved_year
+        ]
+        h_weeks     = sum(1 for r in year_records_filtered if r.is_holiday)
+        non_h_weeks = len(year_records_filtered) - h_weeks
+        total_weeks = len(year_records_filtered) or 1
+
+    holiday_pct = round(h_weeks / total_weeks * 100, 1)
+
+    # ── 6. Revenue bar graph — always the full series for the chart ────────
+    # The bar graph shows ALL years regardless of the year selector,
+    # so the user can see the selected year in context.
+    # We convert the revenue_by_year dict to a flat list for the schema.
+    if isinstance(rev_by_year_blob, dict):
+        revenue_by_year_list = [
+            {"year": yr, "revenue": amt}
+            for yr, amt in rev_by_year_blob.items()
+            if yr != "overall"                        # exclude the summary key
+        ]
+        revenue_by_year_list.sort(key=lambda x: x["year"])
+    else:
+        revenue_by_year_list = []
+
+    # ── 7. Data quality ────────────────────────────────────────────────────
+    dq_blob  = snapshot.data_quality_json
+    dq_slice = _slice(dq_blob, fallback=None)
+    data_quality_obj = DataQualityReport(**dq_slice) if dq_slice else None
+
+    # ── 8. Assemble and return ────────────────────────────────────────────
     return BusinessAnalyticsResponse(
         generated_at=snapshot.generated_at,
         total_transaction_count=snapshot.total_transaction_count or 0,
         total_weekly_records=snapshot.total_weekly_records or 0,
-        total_revenue=snapshot.total_revenue,
+        total_revenue=scoped_revenue,
         avg_weekly_bookings=snapshot.avg_weekly_bookings or 0.0,
         peak_week_date=snapshot.peak_week_date,
         peak_week_bookings=snapshot.peak_week_bookings or 0,
@@ -431,19 +524,29 @@ def get_business_analytics(
             for item in (snapshot.bookings_by_month_json or [])
         ],
         holiday_breakdown=HolidayBreakdown(
-            holiday_weeks=snapshot.holiday_week_count or 0,
-            non_holiday_weeks=snapshot.non_holiday_week_count or 0,
+            holiday_weeks=h_weeks,
+            non_holiday_weeks=non_h_weeks,
             holiday_pct=holiday_pct,
         ),
         avg_lead_time_days=snapshot.avg_lead_time_days,
         lead_time_distribution=[
             LeadTimeBucket(**item)
-            for item in (snapshot.lead_time_distribution_json or [])
+            for item in _slice(snapshot.lead_time_distribution_json)
         ],
         top_airlines=[
             AirlineCount(**item)
-            for item in (snapshot.top_airlines_json or [])
+            for item in _slice(snapshot.top_airlines_json)
         ],
+        top_routes=[
+            RouteCount(**item)
+            for item in _slice(snapshot.top_routes_json)
+        ],
+        revenue_by_year=[
+            RevenueByYear(**item)
+            for item in revenue_by_year_list
+        ],
+        data_quality=data_quality_obj,
+        available_years=snapshot.available_years_json or [],
     )
 
 @app.get("/api/advanced-metrics/{model_id}",
@@ -496,68 +599,58 @@ def get_advanced_metrics(model_id: int, db: Session = Depends(get_db)):
             residuals=[ResidualPoint(**r) for r in (diag.residuals_json or [])],
             acf=_normalize_correlation_points(diag.acf_values_json),
             pacf=_normalize_correlation_points(diag.pacf_values_json),
-            correlation_heatmap=[              # ← NEW
+            correlation_heatmap=[
                 CorrelationHeatmapPoint(**item)
                 for item in (diag.correlation_json or [])
             ],
+            validation_graph=[                                        # ── NEW
+                ValidationPoint(**item)
+                for item in (diag.validation_graph_json or [])
+            ],
         )
+
     )
 
 @app.get("/api/forecast-outlook/{model_id}", response_model=ForecastOutlookResponse)
 def get_forecast_outlook(model_id: int, db: Session = Depends(get_db)):
     """
-    Tab 2: Single endpoint serving both KPI cards (Row 1) and the
-    Critical Forecast Weeks table (Row 3).
+    Tab 2: KPI cards + 12-week critical forecast weeks table.
+    Only queries FORWARD rows (periods_ahead > 0) — excludes BACKTEST rows.
 
-    Single query on forecast_cache — all aggregation derived in Python
-    from the same list. Frontend makes one fetch call for the entire tab.
-
-    ISO 25010:
-      Performance Efficiency → Time Behavior:
-        1 DB query replaces 2. forecast_cache is indexed on model_id.
-        Python aggregation (sum, max over ≤16 rows) is O(n) negligible.
-      Reliability → Fault Tolerance:
-        Null risk_flag defaults to "MEDIUM" with a debug log trace.
-        Model existence is validated before any cache query.
-      Maintainability → Modifiability:
-        Risk logic is isolated to the for-loop below. When finalized,
-        only orchestrator.py (writer) and this loop (reader) change.
-        Schema and frontend are untouched.
+    ISO 25010 Reliability → Fault Tolerance:
+      risk_flag null defaults to MEDIUM with debug log. Never 500s.
     """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
 
+    # Explicitly exclude BACKTEST rows from KPI and table calculations
     rows = (
         db.query(ForecastCache)
-        .filter(ForecastCache.model_id == model_id)
+        .filter(
+            ForecastCache.model_id == model_id,
+            ForecastCache.confidence_tier != "BACKTEST",
+        )
         .order_by(ForecastCache.forecast_date.asc())
         .all()
     )
     if not rows:
-        raise HTTPException(
-            status_code=404,
-            detail="No forecast data found for this model."
-        )
+        raise HTTPException(status_code=404, detail="No forecast data found for this model.")
 
-    # ── KPI derivations (same list, no second query) ──────────────────────
     values = [r.predicted or 0.0 for r in rows]
     forecasted_2w = int(sum(values[:2]))
-
     peak_row = max(rows, key=lambda r: r.predicted or 0.0)
 
-    # ── Critical weeks table ──────────────────────────────────────────────
     critical_weeks = []
     for r in rows:
         risk = r.risk_flag if r.risk_flag in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
         if r.risk_flag is None:
-            logger.debug(
-                "forecast_cache id=%s has null risk_flag, defaulting to MEDIUM", r.id
-            )
+            logger.debug("forecast_cache id=%s null risk_flag → MEDIUM", r.id)
         critical_weeks.append(CriticalForecastWeek(
             week_start=r.forecast_date,
             forecasted_volume=int(r.predicted or 0),
             risk_factor=risk,
+            confidence_tier=r.confidence_tier or "LOWER",
         ))
 
     return ForecastOutlookResponse(
@@ -611,50 +704,60 @@ async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(ge
 @app.get("/api/forecast-graph/{model_id}", response_model=ForecastGraphResponse)
 def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
     """
-    Page 1: Actual vs Predicted graph.
-    Returns historical actuals from training_data_log +
-    future predictions from forecast_cache.
+    Tab 2: Full graph timeline — actuals + backtest + forward forecast.
+
+    Row composition returned to frontend:
+      - All historical actuals from TrainingDataLog (actual populated, predicted None)
+      - 4 BACKTEST rows from forecast_cache (both actual + predicted populated)
+      - 12 forward forecast rows (predicted + CI, actual None)
+
+    confidence_tier field tells the frontend how to color each forecast segment.
+
+    ISO 25010 Performance Efficiency → Time Behavior:
+      Two queries (actuals + cache). No Python aggregation beyond list construction.
     """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
 
-    # Historical actuals
     actuals = db.query(TrainingDataLog).order_by(
         TrainingDataLog.record_date.asc()
     ).all()
-
     if not actuals:
         raise HTTPException(status_code=404, detail="No historical booking data found.")
 
-    # Cached predictions for this model
-    predictions = db.query(ForecastCache).filter(
-        ForecastCache.model_id == model_id
-    ).order_by(ForecastCache.forecast_date.asc()).all()
-
-    if not predictions:
+    # Fetch ALL cache rows (backtest + forward), sorted chronologically
+    cache_rows = (
+        db.query(ForecastCache)
+        .filter(ForecastCache.model_id == model_id)
+        .order_by(ForecastCache.forecast_date.asc())
+        .all()
+    )
+    if not cache_rows:
         raise HTTPException(status_code=404, detail="No forecast data found for this model.")
 
     points = []
 
-    # Actual weeks — predicted is None
+    # Historical actuals — no predicted, no confidence_tier
     for r in actuals:
         points.append(ForecastGraphPoint(
             date=r.record_date,
             actual=r.booking_value,
             predicted=None,
             lower_bound=None,
-            upper_bound=None
+            upper_bound=None,
+            confidence_tier=None,
         ))
 
-    # Future weeks — actual is None
-    for p in predictions:
+    # Backtest + forward rows from cache — actual is None for forward rows
+    for r in cache_rows:
         points.append(ForecastGraphPoint(
-            date=p.forecast_date,
-            actual=None,
-            predicted=p.predicted,
-            lower_bound=p.lower_bound,
-            upper_bound=p.upper_bound
+            date=r.forecast_date,
+            actual=None,                    # frontend overlays actual from the actuals list
+            predicted=r.predicted,
+            lower_bound=r.lower_bound,
+            upper_bound=r.upper_bound,
+            confidence_tier=r.confidence_tier,
         ))
 
     return ForecastGraphResponse(data=points)

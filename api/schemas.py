@@ -39,8 +39,8 @@ class UploadResponse(BaseModel):
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 1: BUSINESS ANALYTICS
-# Endpoint: GET /api/business-analytics
-# Source:   business_analytics_snapshots (dataset-scoped, no model_id)
+# Endpoint: GET /api/business-analytics?year=<year|overall>
+# Source:   dataset_snapshots (dataset-scoped, no model_id)
 # ════════════════════════════════════════════════════════════════════════════
 
 class DateCoverage(BaseModel):
@@ -62,13 +62,37 @@ class HolidayBreakdown(BaseModel):
     holiday_pct: float
 
 class LeadTimeBucket(BaseModel):
-    bucket: str     # "0-7 days", "8-14 days", etc.
+    bucket: str
     count: int
 
 class AirlineCount(BaseModel):
     airline_code: str
     count: int
     pct: float
+
+# ── NEW ──────────────────────────────────────────────────────────────────────
+
+class RouteCount(BaseModel):
+    route: str
+    count: int
+    pct: float
+
+class RevenueByYear(BaseModel):
+    # Flat list for the bar graph: [{"year": "2013", "revenue": 3200000.0}, ...]
+    year: str
+    revenue: float
+
+class DataQualityReport(BaseModel):
+    total_rows: int
+    duplicate_rows: int
+    missing_airline: int
+    missing_route: int
+    missing_travel_date: int
+    invalid_travel_date: int
+    missing_revenue: int
+    quality_score_pct: float
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class BusinessAnalyticsResponse(BaseModel):
     generated_at: datetime
@@ -87,6 +111,12 @@ class BusinessAnalyticsResponse(BaseModel):
     avg_lead_time_days: Optional[float] = None
     lead_time_distribution: List[LeadTimeBucket] = []
     top_airlines: List[AirlineCount] = []
+
+    # ── NEW fields ────────────────────────────────────────────────────────
+    top_routes: List[RouteCount] = []
+    revenue_by_year: List[RevenueByYear] = []
+    data_quality: Optional[DataQualityReport] = None
+    available_years: List[str] = []
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -205,34 +235,35 @@ class ModelRenameRequest(BaseModel):
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 2: FORECAST & ACTIONS
-# Endpoint: reuses GET /api/forecast-graph/{model_id} for the demand graph
-#           and GET /api/strategic-actions/{model_id} for actions table.
-#           Two new computed schemas below for the summary cards + critical weeks.
 # ════════════════════════════════════════════════════════════════════════════
+
+class ForecastGraphPoint(BaseModel):
+    date: datetime
+    actual: Optional[float] = None          # real booking count (TrainingDataLog)
+    predicted: Optional[float] = None       # forward forecast OR backtest fitted value
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
+    confidence_tier: Optional[str] = None   # "BACKTEST" | "HIGH" | "LOWER" | None
+
+class ForecastGraphResponse(BaseModel):
+    data: List[ForecastGraphPoint]
 
 class CriticalForecastWeek(BaseModel):
     week_start: datetime
     forecasted_volume: int
-    risk_factor: str  # "HIGH" | "MEDIUM" | "LOW"
+    risk_factor: str                        # "HIGH" | "MEDIUM" | "LOW"
+    confidence_tier: str                    # so frontend can style HIGH vs LOWER weeks
 
 class ForecastOutlookResponse(BaseModel):
     """
-    Tab 2: All forecast-derived data in a single response.
-    One DB round-trip. No partial-load states on the frontend.
-
-    ISO 25010:
-      Performance Efficiency → Time Behavior:
-        Single query on forecast_cache replaces two separate HTTP calls.
-        All aggregation (sum, max) runs in Python over the already-fetched
-        list — no second DB round-trip needed.
-      Maintainability → Modularity:
-        Frontend Tab 2 has exactly one data dependency for its KPI cards
-        AND its critical weeks table. One loading state, one error boundary.
+    Single endpoint for all Tab 2 KPI cards + critical weeks table.
+    ISO 25010 Performance Efficiency → Time Behavior:
+      One query on forecast_cache (indexed on model_id) feeds everything.
     """
     forecasted_bookings_2w: int
     highest_forecast_week_date: datetime
     highest_forecast_week_value: int
-    critical_weeks: List[CriticalForecastWeek]
+    critical_weeks: List[CriticalForecastWeek]   # all 12 forward weeks
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3: ADVANCED METRICS — extends existing AdvancedMetricsResponse
@@ -243,6 +274,14 @@ class CorrelationHeatmapPoint(BaseModel):
     variable: str
     correlation: float
 
+class ValidationPoint(BaseModel):
+    date_label: str      # "Sep W2"
+    actual: int
+    forecasted: float
+    lower_ci: float
+    upper_ci: float
+
+
 # AdvancedCharts already exists — we need to ADD correlation_heatmap to it.
 # Replace the existing AdvancedCharts class with this:
 class AdvancedCharts(BaseModel):
@@ -250,6 +289,8 @@ class AdvancedCharts(BaseModel):
     acf: List[CorrelationPoint] = Field(default_factory=list)
     pacf: List[CorrelationPoint] = Field(default_factory=list)
     correlation_heatmap: List[CorrelationHeatmapPoint] = Field(default_factory=list)
+    validation_graph: List[ValidationPoint] = Field(default_factory=list)  # ── NEW
+
 
 class AdvancedMetricsResponse(BaseModel):
     model_params: ModelParams

@@ -137,6 +137,44 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
     test_pred_s  = pd.Series(test_pred.values, index=test_wk.index)
     train_pred_s = pd.Series(train_pred.values, index=train_wk.index)
 
+    # ── NEW: Validation graph payload ─────────────────────────────────────
+    # Uses the test-set split (chronological holdout) to show Actual vs
+    # Predicted over the evaluation window. This is the ONLY defensible
+    # source of validation data — it uses held-out data the model never
+    # saw during training.
+    #
+    # get_prediction() gives us in-sample predictions WITH confidence
+    # intervals, which fittedvalues alone does not provide.
+    # We scope it to the test window only (start=test_wk.index[0]).
+    #
+    # ISO 25010 Reliability → Maturity:
+    #   Validation against held-out data is a direct measure of model
+    #   generalisability. Exposing this to the user is a transparency
+    #   commitment, not just a UI feature.
+
+    pred_obj = fitted.get_prediction(
+        start=test_wk.index[0],
+        end=test_wk.index[-1],
+        exog=test_X,
+    )
+    pred_mean = pred_obj.predicted_mean.clip(lower=0)
+    pred_ci   = pred_obj.conf_int(alpha=0.05)
+    ci_lo     = pred_ci.iloc[:, 0].clip(lower=0)
+    ci_hi     = pred_ci.iloc[:, 1].clip(lower=0)
+
+    validation_graph = []
+    for dt, actual_val in zip(test_wk.index, test_y_raw):
+        # Date label format matches your frontend: "Sep W2", "Oct W1", etc.
+        week_of_month = (dt.day - 1) // 7 + 1
+        date_label = f"{dt.strftime('%b')} W{week_of_month}"
+        validation_graph.append({
+            "date_label":  date_label,
+            "actual":      int(round(float(actual_val))),
+            "forecasted":  round(float(pred_mean.loc[dt]), 2),
+            "lower_ci":    round(float(ci_lo.loc[dt]), 2),
+            "upper_ci":    round(float(ci_hi.loc[dt]), 2),
+        })
+
     # ═══════════════════════════════════════════════════════════════════════
     # 6.2  MULTI-RESOLUTION METRICS  (logic unchanged)
     # ═══════════════════════════════════════════════════════════════════════
@@ -311,9 +349,18 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
     # The only difference is that the values are now more accurate
     # (tighter CIs, better point forecasts).
     # ═══════════════════════════════════════════════════════════════════════
+
+    # ── MODIFIED: Tag each forward forecast row with confidence_tier ──────
+    # Boundary: weeks 1-2 use OpenMeteo weather (reliable ~14-day window).
+    # Weeks 3+ use climatological proxies — wider CI, lower confidence.
+    # This boundary is a BUSINESS RULE, stored as data not code.
+    # To change the boundary, update WEATHER_HORIZON in core/config.py.
+    WEATHER_HORIZON = 2  # weeks
+
     payload = []
-    for dt, r in forecast_df.iterrows():
+    for i, (dt, r) in enumerate(forecast_df.iterrows()):
         we = dt + timedelta(days=6)
+        tier = "HIGH" if (i + 1) <= WEATHER_HORIZON else "LOWER"
         payload.append({
             "week_start":           dt.strftime("%Y-%m-%d"),
             "week_end":             we.strftime("%Y-%m-%d"),
@@ -323,9 +370,43 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
             "holiday_lead_level":   int(r["holiday_lead"]),
             "is_long_weekend":      int(r["is_long_weekend"]),
             "typhoon_climate_flag": int(r["typhoon_climate_flag"]),
+            "confidence_tier":      tier,            # ── NEW
+        })
+
+    # ── NEW: Trailing 4 weeks of in-sample fitted values (BACKTEST rows) ──
+    # fittedvalues are the model's predictions on its own training data.
+    # We store only the trailing 4 to show the user recent model accuracy
+    # right before the forecast window — a diagnostic bridge, not full history.
+    #
+    # ISO 25010 Reliability → Maturity:
+    #   The user sees whether the model tracked reality recently before
+    #   trusting the forward forecast. Transparency over blind trust.
+    fitted_series = fitted.fittedvalues.clip(lower=0)
+    trailing_fitted = fitted_series.iloc[-4:]
+
+    # We need actual values for the same 4 weeks to let the frontend
+    # overlay them. These come from the full weekly_df (step1["weekly_df"]).
+    trailing_actuals = w["bookings_weekly"].iloc[-4:]
+
+    backtest_payload = []
+    for i, (dt, fitted_val) in enumerate(trailing_fitted.items()):
+        actual_val = trailing_actuals.iloc[i]
+        we = dt + timedelta(days=6)
+        backtest_payload.append({
+            "week_start":           dt.strftime("%Y-%m-%d"),
+            "week_end":             we.strftime("%Y-%m-%d"),
+            "forecast_bookings":    int(round(fitted_val)),
+            "actual_bookings":      int(round(actual_val)),   # only BACKTEST rows have this
+            "confidence_lower_95":  int(round(fitted_val)),   # no CI for in-sample fit
+            "confidence_upper_95":  int(round(fitted_val)),   # same — point estimate only
+            "holiday_lead_level":   0,
+            "is_long_weekend":      0,
+            "typhoon_climate_flag": 0,
+            "confidence_tier":      "BACKTEST",               # ── NEW
         })
 
     forecast_json = json.dumps(payload, indent=2)
+    backtest_json = json.dumps(backtest_payload, indent=2)
 
     print(f"\n── JSON Payload (first 2 records) ──")
     print(json.dumps(payload[:2], indent=2))
@@ -355,8 +436,11 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
 
     print(f"\n✅ Step 6 complete. Pipeline finished.")
 
+    # Add to the return dict so orchestrator can persist it
     return {
-        "test_metrics":  test_metrics,
-        "forecast_df":   forecast_df,
-        "forecast_json": forecast_json,
+        "test_metrics":      test_metrics,
+        "forecast_df":       forecast_df,
+        "forecast_json":     forecast_json,
+        "backtest_json":     backtest_json,
+        "validation_graph":  validation_graph,    # ── NEW
     }

@@ -1,22 +1,4 @@
-"""
-services/analytics_service.py
-──────────────────────────────
-Computes and stages a DatasetSnapshot from training_data_log rows
-belonging to a specific ingestion batch.
-
-Called atomically inside ingestion_service.py — never on the request path.
-The caller owns db.commit(). This function only stages the write.
-
-ISO 25010:
-  Performance Efficiency → Time Behavior:
-    All aggregations run once at write time. The GET /api/business-analytics
-    request path is a single SELECT with no GROUP BY or SUM.
-  Maintainability → Modularity:
-    Zero imports from the ML pipeline.
-  Reliability → Maturity:
-    One snapshot per ingestion batch. Selecting Model #1 always shows
-    the dataset that model was trained on — not the latest upload.
-"""
+# services/analytics_service.py
 from __future__ import annotations
 
 import logging
@@ -24,7 +6,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
-
 from domain.models import DatasetSnapshot, TrainingDataLog
 
 logger = logging.getLogger(__name__)
@@ -36,21 +17,31 @@ def compute_and_persist_dataset_snapshot(
     ingestion_batch_id: str,
     avg_lead_time_days: float | None = None,
     lead_time_distribution: list | None = None,
-    top_airlines: list | None = None,
+    # ── MODIFIED: was top_airlines (flat list), now year-keyed dict ──────
+    top_airlines_by_year: dict | None = None,
+    # ── NEW parameters ────────────────────────────────────────────────────
+    top_routes_by_year: dict | None = None,
+    revenue_by_year: dict | None = None,
+    data_quality_by_year: dict | None = None,
+    available_years: list | None = None,
 ) -> DatasetSnapshot:
     """
     Aggregates all training_data_log rows for the given ingestion_batch_id
     and stages a DatasetSnapshot row for the caller to commit.
 
-    Args:
-        db: Active SQLAlchemy Session inside an open transaction.
-        ingestion_batch_id: UUID identifying this upload batch.
+    The caller (ingestion_service.py) owns db.commit().
+    This function only stages the write — never commits.
 
-    Returns:
-        The staged (not yet committed) DatasetSnapshot ORM object.
-
-    Raises:
-        ValueError: If no rows exist for the given batch ID.
+    ISO 25010:
+      Performance Efficiency → Time Behavior:
+        All aggregations run once at write time. The GET /api/business-analytics
+        request path remains a single indexed SELECT with no GROUP BY or SUM.
+      Reliability → Maturity:
+        One snapshot per ingestion batch. Selecting an old model always shows
+        the dataset that model was trained on, not the latest upload.
+      Maintainability → Modularity:
+        Zero imports from the ML pipeline. This service knows nothing
+        about SARIMAX, pmdarima, or forecasting.
     """
     records = (
         db.query(TrainingDataLog)
@@ -65,39 +56,39 @@ def compute_and_persist_dataset_snapshot(
             f"ingestion_batch_id={ingestion_batch_id}."
         )
 
-    # ── Core counts ──────────────────────────────────────────────────────
+    # ── Core counts ───────────────────────────────────────────────────────
     total_weekly_records = len(records)
     total_transaction_count = int(sum(r.booking_value or 0 for r in records))
 
-    # ── Revenue ──────────────────────────────────────────────────────────
+    # ── Revenue ───────────────────────────────────────────────────────────
     revenues = [r.weekly_revenue for r in records if r.weekly_revenue is not None]
     total_revenue = float(sum(revenues)) if revenues else None
 
-    # ── Date coverage ─────────────────────────────────────────────────────
+    # ── Date coverage ──────────────────────────────────────────────────────
     data_start_date = records[0].record_date
-    data_end_date = records[-1].record_date
+    data_end_date   = records[-1].record_date
 
-    # ── Weekly booking statistics ─────────────────────────────────────────
-    booking_values = [float(r.booking_value or 0) for r in records]
+    # ── Weekly booking statistics ──────────────────────────────────────────
+    booking_values    = [float(r.booking_value or 0) for r in records]
     avg_weekly_bookings = sum(booking_values) / len(booking_values)
-    peak_value = max(booking_values)
-    peak_index = booking_values.index(peak_value)
-    peak_week_date = records[peak_index].record_date
+    peak_value        = max(booking_values)
+    peak_index        = booking_values.index(peak_value)
+    peak_week_date    = records[peak_index].record_date
     peak_week_bookings = int(peak_value)
 
-    # ── Growth rate ───────────────────────────────────────────────────────
+    # ── Growth rate ────────────────────────────────────────────────────────
     if total_weekly_records >= 104:
         recent = sum(booking_values[-52:])
-        prior = sum(booking_values[-104:-52])
+        prior  = sum(booking_values[-104:-52])
         growth_rate = round((recent - prior) / prior * 100, 1) if prior > 0 else 0.0
     elif total_weekly_records >= 52:
         recent = sum(booking_values[-26:])
-        prior = sum(booking_values[-52:-26])
+        prior  = sum(booking_values[-52:-26])
         growth_rate = round((recent - prior) / prior * 100, 1) if prior > 0 else 0.0
     else:
         growth_rate = 0.0
 
-    # ── Bookings by year ──────────────────────────────────────────────────
+    # ── Bookings by year ───────────────────────────────────────────────────
     year_map: dict[str, int] = {}
     for r in records:
         key = str(r.record_date.year)
@@ -107,7 +98,7 @@ def compute_and_persist_dataset_snapshot(
         for yr, count in sorted(year_map.items())
     ]
 
-    # ── Bookings by month ─────────────────────────────────────────────────
+    # ── Bookings by month ──────────────────────────────────────────────────
     month_map: dict[str, int] = {}
     for r in records:
         key = r.record_date.strftime("%Y-%m")
@@ -117,11 +108,11 @@ def compute_and_persist_dataset_snapshot(
         for mo, count in sorted(month_map.items())
     ]
 
-    # ── Holiday breakdown ─────────────────────────────────────────────────
-    holiday_week_count = sum(1 for r in records if r.is_holiday)
+    # ── Holiday breakdown ──────────────────────────────────────────────────
+    holiday_week_count     = sum(1 for r in records if r.is_holiday)
     non_holiday_week_count = total_weekly_records - holiday_week_count
 
-    # ── Stage the snapshot ────────────────────────────────────────────────
+    # ── Stage the snapshot ─────────────────────────────────────────────────
     snapshot = DatasetSnapshot(
         ingestion_batch_id=ingestion_batch_id,
         generated_at=datetime.now(PH_TZ),
@@ -139,10 +130,15 @@ def compute_and_persist_dataset_snapshot(
         bookings_by_month_json=bookings_by_month,
         holiday_week_count=holiday_week_count,
         non_holiday_week_count=non_holiday_week_count,
-        avg_lead_time_days=avg_lead_time_days,           # ← new
-        lead_time_distribution_json=lead_time_distribution,  # ← new
-        top_airlines_json=top_airlines,                  # ← new
-
+        avg_lead_time_days=avg_lead_time_days,
+        lead_time_distribution_json=lead_time_distribution,
+        # ── MODIFIED: year-keyed dict replaces old flat list ──────────────
+        top_airlines_json=top_airlines_by_year,
+        # ── NEW columns ───────────────────────────────────────────────────
+        top_routes_json=top_routes_by_year,
+        revenue_by_year_json=revenue_by_year,
+        data_quality_json=data_quality_by_year,
+        available_years_json=available_years,
     )
     db.add(snapshot)
 

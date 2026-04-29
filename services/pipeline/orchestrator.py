@@ -396,6 +396,7 @@ def persist_to_neon(
                 jarquebera_stat=jb_stat,
                 jarquebera_pvalue=jb_p,
                 jarquebera_conclusion=jb_conc,
+                validation_graph_json=step6["validation_graph"],    # ── NEW
             ))
 
             # 4. Clear any stale forecast rows for this model, then insert fresh ones
@@ -403,15 +404,36 @@ def persist_to_neon(
                 ForecastCache.model_id == model_id
             ).delete()
 
-            for i, (dt, row) in enumerate(forecast_df.iterrows()):
+            # ── Existing: persist forward forecast rows ───────────────────
+            forecast_data = json.loads(step6["forecast_json"])
+            for i, item in enumerate(forecast_data):
                 db.add(ForecastCache(
                     model_id=model_id,
-                    forecast_date=dt.replace(tzinfo=ph_tz),  # attach PH timezone
-                    predicted=float(np.round(row["forecast"])),
-                    lower_bound=float(np.round(row["lo95"])),
-                    upper_bound=float(np.round(row["hi95"])),
-                    generated_at=datetime.now(ph_tz),
+                    forecast_date=pd.Timestamp(item["week_start"]).to_pydatetime(),
+                    predicted=item["forecast_bookings"],
+                    lower_bound=item["confidence_lower_95"],
+                    upper_bound=item["confidence_upper_95"],
                     periods_ahead=i + 1,
+                    risk_flag="MEDIUM",                      # Q4: placeholder
+                    confidence_tier=item["confidence_tier"], # ── NEW
+                    generated_at=datetime.now(ph_tz),
+                ))
+
+            # ── NEW: persist trailing 4 backtest rows ─────────────────────
+            # periods_ahead is negative to distinguish from forward rows.
+            # -4 = 4 weeks before forecast start, -1 = 1 week before.
+            backtest_data = json.loads(step6["backtest_json"])
+            for i, item in enumerate(backtest_data):
+                db.add(ForecastCache(
+                    model_id=model_id,
+                    forecast_date=pd.Timestamp(item["week_start"]).to_pydatetime(),
+                    predicted=item["forecast_bookings"],
+                    lower_bound=item["confidence_lower_95"],
+                    upper_bound=item["confidence_upper_95"],
+                    periods_ahead=-(4 - i),   # -4, -3, -2, -1
+                    risk_flag=None,            # no risk for backtest rows
+                    confidence_tier="BACKTEST",
+                    generated_at=datetime.now(ph_tz),
                 ))
 
             # 5. Insert KPI snapshot for Page 1 dashboard cards

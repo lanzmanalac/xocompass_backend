@@ -23,6 +23,7 @@ LEAD_SEARCH_MAX = 8
 
 # ── FIX 1: Typhoon hangover ──
 TYPHOON_HANGOVER = 2
+WEATHER_HORIZON = 2
 
 # ── Stationarity Testing ──
 ADF_ALPHA = 0.05  # Significance level for ADF test

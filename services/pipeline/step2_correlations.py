@@ -94,7 +94,7 @@ def run_step2_correlations(step1):
                 "correlation": round(float(r), 4)
             })
 
-    print(f"\n✅ Step 2 complete.")
+    print(f"\nStep 2 complete.")
     return {
         "corr_matrix": corr_matrix,
         "correlation_heatmap": correlation_heatmap # <-- Added this!

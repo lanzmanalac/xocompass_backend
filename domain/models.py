@@ -50,6 +50,7 @@ class SarimaxModel(Base):
     # Tell the database to destroy the child records when the parent is deleted
     diagnostics = relationship("ModelDiagnostic", back_populates="model", uselist=False, cascade="all, delete-orphan")
     forecasts = relationship("ForecastCache", backref="model", cascade="all, delete-orphan")
+
 # 2. THE LEDGER (Page 3 History & Uploads)
 class TrainingDataLog(Base):
     __tablename__ = "training_data_log"
@@ -84,29 +85,38 @@ class DatasetSnapshot(Base):
     generated_at = Column(DateTime(timezone=True), default=get_ph_now)
 
     total_transaction_count = Column(Integer)
-    total_weekly_records = Column(Integer)
-    total_revenue = Column(Float, nullable=True)
+    total_weekly_records    = Column(Integer)
+    total_revenue           = Column(Float, nullable=True)
 
     data_start_date = Column(DateTime(timezone=True))
-    data_end_date = Column(DateTime(timezone=True))
-    span_weeks = Column(Integer)
+    data_end_date   = Column(DateTime(timezone=True))
+    span_weeks      = Column(Integer)
 
     avg_weekly_bookings = Column(Float)
-    peak_week_date = Column(DateTime(timezone=True))
-    peak_week_bookings = Column(Integer)
-    growth_rate = Column(Float)
+    peak_week_date      = Column(DateTime(timezone=True))
+    peak_week_bookings  = Column(Integer)
+    growth_rate         = Column(Float)
 
-    bookings_by_year_json = Column(JSON)
+    bookings_by_year_json  = Column(JSON)
     bookings_by_month_json = Column(JSON)
 
-    holiday_week_count = Column(Integer)
+    holiday_week_count     = Column(Integer)
     non_holiday_week_count = Column(Integer)
 
-    # Lead time analytics — computed from raw CSV at ingestion time
-    avg_lead_time_days = Column(Float, nullable=True)
-    lead_time_distribution_json = Column(JSON, nullable=True)  # pre-bucketed histogram
-    top_airlines_json = Column(JSON, nullable=True)            # top 5-7 airlines by count
+    avg_lead_time_days         = Column(Float, nullable=True)
+    lead_time_distribution_json = Column(JSON, nullable=True)
 
+    # MODIFIED: now stores year-keyed dict {"overall": [...], "2013": [...]}
+    # Old rows with a flat list will return their overall slice gracefully
+    # because the endpoint defaults to snapshot.top_airlines_json.get("overall")
+    # with a fallback to the raw value.
+    top_airlines_json = Column(JSON, nullable=True)
+
+    # ── NEW columns ───────────────────────────────────────────────────────
+    top_routes_json      = Column(JSON, nullable=True)  # year-keyed top routes
+    revenue_by_year_json = Column(JSON, nullable=True)  # {"overall": float, "2013": float}
+    data_quality_json    = Column(JSON, nullable=True)  # year-keyed quality report
+    available_years_json = Column(JSON, nullable=True)  # ["2013", "2014", ...]
 
 # 4. DIAGNOSTICS (Page 2 Technical Charts)
 class ModelDiagnostic(Base):
@@ -137,6 +147,8 @@ class ModelDiagnostic(Base):
     jarquebera_pvalue = Column(Float)
     jarquebera_conclusion = Column(String(100))
 
+    validation_graph_json = Column(JSON, nullable=True)
+
     model = relationship("SarimaxModel", back_populates="diagnostics")
 
 # 5. FORECAST CACHE (Page 1 Graph)
@@ -152,3 +164,5 @@ class ForecastCache(Base):
     generated_at = Column(DateTime(timezone=True), default=get_ph_now)
     periods_ahead = Column(Integer)
     risk_flag = Column(String(10), nullable=True)
+
+    confidence_tier = Column(String(20), nullable=True)

@@ -255,7 +255,7 @@ def run_step1_data_ingestion(csv_path="KJS Data.csv"):
     ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
     plt.tight_layout(); plt.show()
 
-    print(f"\n✅ Step 1 complete.")
+    print(f"\nStep 1 complete.")
 
     return {
         "df_raw":        df_raw,
