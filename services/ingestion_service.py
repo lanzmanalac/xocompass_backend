@@ -293,7 +293,8 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
 
         # ── NEW: Revenue by year (for the bar graph KPI card) ─────────────
         # Shape: {"overall": 45000000.0, "2013": 3200000.0, "2014": 4100000.0, ...}
-        revenue_by_year = {"overall": round(float(df["_revenue_cleaned"].sum()), 2)}
+        df["_year"] = pd.to_datetime(df["booking_date"]).dt.year
+        
         for year, grp in df.groupby("_year"):
             revenue_by_year[str(int(year))] = round(float(grp["_revenue_cleaned"].sum()), 2)
         print(f"   💰 Revenue by year computed: {list(revenue_by_year.keys())}")
