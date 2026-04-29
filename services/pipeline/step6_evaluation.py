@@ -373,43 +373,40 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
             "confidence_tier":      tier,            # ── NEW
         })
 
-# ── Trailing 4 backtest rows — with proper in-sample prediction intervals ──
-    # get_prediction() on training data gives real CIs from the SARIMAX
-    # covariance matrix, same machinery as the validation graph and forward
-    # forecast. The previous version zeroed both bounds (CI width = 0),
-    # which was visually broken and statistically misleading.
-    trailing_idx_start = w.index[-4]
-    trailing_idx_end   = w.index[-1]
+    # ── NEW: Trailing 4 weeks of in-sample fitted values (BACKTEST rows) ──
+    # Calling get_prediction() with no arguments automatically uses the 
+    # model's internal training exog data, avoiding ValueError crashes.
+    in_sample_preds = fitted.get_prediction()
+    
+    # Extract mean and CI for the whole training set
+    fitted_series = in_sample_preds.predicted_mean.clip(lower=0)
+    in_sample_ci = in_sample_preds.conf_int(alpha=0.05)
+    
+    # Slice off just the trailing 4 weeks
+    trailing_fitted = fitted_series.iloc[-4:]
+    trailing_ci_lo = in_sample_ci.iloc[:, 0].clip(lower=0).iloc[-4:]
+    trailing_ci_hi = in_sample_ci.iloc[:, 1].clip(lower=0).iloc[-4:]
 
-    backtest_pred_obj = fitted.get_prediction(
-        start=trailing_idx_start,
-        end=trailing_idx_end,
-    )
-    backtest_mean = backtest_pred_obj.predicted_mean.clip(lower=0)
-    backtest_ci   = backtest_pred_obj.conf_int(alpha=0.05)
-    backtest_lo   = backtest_ci.iloc[:, 0].clip(lower=0)
-    backtest_hi   = backtest_ci.iloc[:, 1].clip(lower=0)
-
-    trailing_actuals = w["bookings_weekly"].iloc[-4:]
+    # Get the matching actuals
+    trailing_actuals = w["bookings_weekly"].loc[trailing_fitted.index]
 
     backtest_payload = []
-    for i, dt in enumerate(backtest_mean.index):
-        actual_val = trailing_actuals.iloc[i]
-        fitted_val = backtest_mean.iloc[i]
+    for i, (dt, fitted_val) in enumerate(trailing_fitted.items()):
+        actual_val = trailing_actuals.loc[dt]
         we = dt + timedelta(days=6)
         backtest_payload.append({
             "week_start":           dt.strftime("%Y-%m-%d"),
             "week_end":             we.strftime("%Y-%m-%d"),
-            "forecast_bookings":    int(round(float(fitted_val))),
-            "actual_bookings":      int(round(float(actual_val))),
-            "confidence_lower_95":  int(round(float(backtest_lo.iloc[i]))),
-            "confidence_upper_95":  int(round(float(backtest_hi.iloc[i]))),
+            "forecast_bookings":    int(round(fitted_val)),
+            "actual_bookings":      int(round(actual_val)),   
+            "confidence_lower_95":  int(round(trailing_ci_lo.loc[dt])),   # ── NOW HAS REAL C.I.
+            "confidence_upper_95":  int(round(trailing_ci_hi.loc[dt])),   # ── NOW HAS REAL C.I.
             "holiday_lead_level":   0,
             "is_long_weekend":      0,
             "typhoon_climate_flag": 0,
-            "confidence_tier":      "BACKTEST",
+            "confidence_tier":      "BACKTEST",               
         })
-        
+
     forecast_json = json.dumps(payload, indent=2)
     backtest_json = json.dumps(backtest_payload, indent=2)
 
