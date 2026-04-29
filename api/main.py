@@ -44,6 +44,10 @@ from api.schemas import (
     CriticalForecastWeek,
     ForecastOutlookResponse,
     CorrelationHeatmapPoint,
+    ValidationPoint,
+    DataQualityReport,
+    RouteCount, RevenueByYear,
+
 )
 
 # ── IMPORT DATABASE ARCHITECTURE ──
