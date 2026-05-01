@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ════════════════════════════════════════════════════════════════════════════
 # SHARED UTILITY SCHEMAS
@@ -56,6 +56,21 @@ class BookingsByMonth(BaseModel):
     month: str      # format: "2023-01"
     bookings: int
 
+class RevenueByMonth(BaseModel):
+    """
+    Monthly revenue aggregate.
+    Parallel structure to BookingsByMonth — same month key format ("YYYY-MM")
+    so the frontend can zip both arrays on the same x-axis without any
+    client-side date parsing.
+
+    ISO 25010 — Maintainability → Reusability:
+        Defined as a standalone class so future endpoints (e.g. revenue
+        forecasting) can reference this schema without duplication.
+    """
+    month: str      # format: "2023-01"
+    revenue: float
+
+
 class HolidayBreakdown(BaseModel):
     holiday_weeks: int
     non_holiday_weeks: int
@@ -106,6 +121,7 @@ class BusinessAnalyticsResponse(BaseModel):
     date_coverage: DateCoverage
     bookings_by_year: List[BookingsByYear]
     bookings_by_month: List[BookingsByMonth]
+    revenue_by_month: List[RevenueByMonth] = []   # ← ADD — default [] for backwards compat
     holiday_breakdown: HolidayBreakdown
 
     avg_lead_time_days: Optional[float] = None
@@ -250,6 +266,7 @@ class ForecastGraphResponse(BaseModel):
 
 class CriticalForecastWeek(BaseModel):
     week_start: datetime
+    week_end: datetime
     forecasted_volume: int
     risk_factor: str                        # "HIGH" | "MEDIUM" | "LOW"
     confidence_tier: str                    # so frontend can style HIGH vs LOWER weeks

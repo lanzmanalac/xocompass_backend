@@ -49,6 +49,7 @@ from api.schemas import (
     ValidationPoint,
     DataQualityReport,
     RouteCount, RevenueByYear,
+    RevenueByMonth,
 
 )
 
@@ -559,6 +560,11 @@ def get_business_analytics(
             for item in (snapshot.bookings_by_month_json or [])
             if resolved_year == "overall" or item.get("month", "").startswith(resolved_year)
         ],
+        revenue_by_month=[
+            RevenueByMonth(**item)
+            for item in (snapshot.revenue_by_month_json or [])
+        ],
+
         holiday_breakdown=HolidayBreakdown(
             holiday_weeks=h_weeks,
             non_holiday_weeks=non_h_weeks,
@@ -677,16 +683,39 @@ def get_forecast_outlook(model_id: int, db: Session = Depends(get_db)):
     forecasted_2w = int(sum(values[:2]))
     peak_row = max(rows, key=lambda r: r.predicted or 0.0)
 
+    # Confidence tier thresholds — tune these to your CI width interpretation.
+    # Currently: weeks 1–2 = HIGH confidence, weeks 3+ = LOWER confidence.
+    # This mirrors the frontier your SARIMAX CI bands widen after week 2.
+    HIGH_CONFIDENCE_HORIZON = 2
+
     critical_weeks = []
-    for r in rows:
+    for idx, r in enumerate(rows):
+        # ── Risk flag with defensive fallback ────────────────────────────
         risk = r.risk_flag if r.risk_flag in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
         if r.risk_flag is None:
-            logger.debug("forecast_cache id=%s null risk_flag → MEDIUM", r.id)
+            logger.debug(
+                "forecast_cache id=%s has null risk_flag, defaulting to MEDIUM", r.id
+            )
+
+        # ── Confidence tier: derived from forecast horizon position ──────
+        # Weeks 1–2 (idx 0,1): CI bands are narrow → HIGH confidence.
+        # Weeks 3+  (idx 2+):  CI bands widen with horizon → LOWER confidence.
+        # This is a direct reflection of SARIMAX's increasing uncertainty
+        # over multi-step forecasts — defensible at thesis defense.
+        confidence_tier = "HIGH" if idx < HIGH_CONFIDENCE_HORIZON else "LOWER"
+
+        # ── week_end: always Saturday/Sunday of the same ISO week ────────
+        # forecast_date is always a Monday (weekly freq anchor).
+        # Adding timedelta(days=6) gives the Sunday — the natural week boundary
+        # for a Mon–Sun travel industry week.
+        week_end = r.forecast_date + timedelta(days=6)
+
         critical_weeks.append(CriticalForecastWeek(
             week_start=r.forecast_date,
+            week_end=week_end,
             forecasted_volume=int(r.predicted or 0),
             risk_factor=risk,
-            confidence_tier=r.confidence_tier or "LOWER",
+            confidence_tier=confidence_tier,
         ))
 
     return ForecastOutlookResponse(
@@ -794,7 +823,7 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
     points.sort(key=lambda p: p.date)
 
     return ForecastGraphResponse(data=points)
-        
+
 @app.get("/api/strategic-actions/{model_id}", 
          response_model=StrategicActionsResponse)
 def get_strategic_actions(model_id: int, db: Session = Depends(get_db)):

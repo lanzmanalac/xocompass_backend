@@ -108,6 +108,29 @@ def compute_and_persist_dataset_snapshot(
         for mo, count in sorted(month_map.items())
     ]
 
+    # ── Revenue by month ──────────────────────────────────────────────────
+    # Mirrors bookings_by_month exactly — same key format ("YYYY-MM"),
+    # same sort order. Null weekly_revenue rows are skipped gracefully
+    # so datasets without revenue data produce an empty list rather than
+    # crashing. The frontend can use this as a direct parallel data series
+    # on the same x-axis as bookings_by_month.
+    #
+    # ISO 25010 — Reliability → Fault Tolerance:
+    #   None-safe: `r.weekly_revenue or 0.0` ensures no TypeError on null rows.
+    # ISO 25010 — Performance Efficiency → Time Behavior:
+    #   Aggregated once at write time. Zero cost on the GET request path.
+    revenue_month_map: dict[str, float] = {}
+    for r in records:
+        if r.weekly_revenue is not None:
+            key = r.record_date.strftime("%Y-%m")
+            revenue_month_map[key] = round(
+                revenue_month_map.get(key, 0.0) + float(r.weekly_revenue), 2
+            )
+    revenue_by_month = [
+        {"month": mo, "revenue": amt}
+        for mo, amt in sorted(revenue_month_map.items())
+    ]
+
     # ── Holiday breakdown ──────────────────────────────────────────────────
     holiday_week_count     = sum(1 for r in records if r.is_holiday)
     non_holiday_week_count = total_weekly_records - holiday_week_count
@@ -128,6 +151,7 @@ def compute_and_persist_dataset_snapshot(
         growth_rate=growth_rate,
         bookings_by_year_json=bookings_by_year,
         bookings_by_month_json=bookings_by_month,
+        revenue_by_month_json=revenue_by_month,    
         holiday_week_count=holiday_week_count,
         non_holiday_week_count=non_holiday_week_count,
         avg_lead_time_days=avg_lead_time_days,

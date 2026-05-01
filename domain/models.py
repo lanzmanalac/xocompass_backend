@@ -99,6 +99,7 @@ class DatasetSnapshot(Base):
 
     bookings_by_year_json  = Column(JSON)
     bookings_by_month_json = Column(JSON)
+    revenue_by_month_json = Column(JSON, nullable=True)
 
     holiday_week_count     = Column(Integer)
     non_holiday_week_count = Column(Integer)
