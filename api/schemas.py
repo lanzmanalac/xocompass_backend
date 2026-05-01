@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Literal
 from datetime import datetime, timedelta
 
@@ -271,6 +271,7 @@ class CriticalForecastWeek(BaseModel):
     risk_factor: str                        # "HIGH" | "MEDIUM" | "LOW"
     confidence_tier: str                    # so frontend can style HIGH vs LOWER weeks
 
+    model_config = ConfigDict(extra="forbid")
 class ForecastOutlookResponse(BaseModel):
     """
     Single endpoint for all Tab 2 KPI cards + critical weeks table.
@@ -280,6 +281,7 @@ class ForecastOutlookResponse(BaseModel):
     forecasted_bookings_2w: int
     highest_forecast_week_date: datetime
     highest_forecast_week_value: int
+    forecasted_bookings_10w: int          # ← FIXED typo + correct field name
     critical_weeks: List[CriticalForecastWeek]   # all 12 forward weeks
 
 # ════════════════════════════════════════════════════════════════════════════

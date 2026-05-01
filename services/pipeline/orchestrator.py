@@ -404,21 +404,59 @@ def persist_to_neon(
                 ForecastCache.model_id == model_id
             ).delete()
 
-            # ── Existing: persist forward forecast rows ───────────────────
+            # ── Compute the strict cutoff: one week after the last training date.
+            # Any forecast row whose week_start falls ON or BEFORE this cutoff
+            # already exists in training_data_log and must be excluded.
+            # This prevents forecast_cache from colliding with actuals, which
+            # would cause the deduplication guard in get_forecast_graph to
+            # silently discard valid future-facing rows.
+            #
+            # ISO 25010 → Reliability: Data Integrity.
+            # The forecast window is deterministic: it always begins strictly
+            # after the last observed training week.
+            last_train_date = step3["train_wk"].index.max()
+            strict_cutoff   = pd.Timestamp(last_train_date).normalize()  # floor to midnight
+
             forecast_data = json.loads(step6["forecast_json"])
-            for i, item in enumerate(forecast_data):
+            forward_rows_written = 0
+            for item in forecast_data:
+                row_date = pd.Timestamp(item["week_start"]).normalize()
+
+                # Skip any row that lands on or before the last training date.
+                # These are in-sample dates that step6 may emit at the boundary.
+                if row_date <= strict_cutoff:
+                    print(
+                        f"   ⚠️  Skipping forecast row {row_date.date()} — "
+                        f"on or before training cutoff {strict_cutoff.date()}. "
+                        "This date already exists in training_data_log."
+                    )
+                    continue
+
+                forward_rows_written += 1
                 db.add(ForecastCache(
                     model_id=model_id,
-                    forecast_date=pd.Timestamp(item["week_start"]).to_pydatetime(),
+                    forecast_date=row_date.to_pydatetime().replace(tzinfo=ph_tz),
                     predicted=item["forecast_bookings"],
                     lower_bound=item["confidence_lower_95"],
                     upper_bound=item["confidence_upper_95"],
-                    periods_ahead=i + 1,
-                    risk_flag="MEDIUM",                      # Q4: placeholder
-                    confidence_tier=item["confidence_tier"], # ── NEW
+                    periods_ahead=forward_rows_written,   # re-index from 1 after skips
+                    risk_flag="MEDIUM",
+                    confidence_tier=item["confidence_tier"],
                     generated_at=datetime.now(ph_tz),
                 ))
 
+            print(f"   ✅ Wrote {forward_rows_written} forward forecast rows "
+                  f"(cutoff: {strict_cutoff.date()})")
+
+            # Guard: warn if step6 didn't generate enough non-overlapping rows.
+            # If forward_rows_written < 8, the model's forecast horizon is too short
+            # relative to the training tail. Retrain with a longer forecast_steps.
+            if forward_rows_written < 8:
+                print(
+                    f"   ⚠️  WARNING: Only {forward_rows_written} forward forecast rows "
+                    f"written. Expected ≥8. Check that forecast_steps in "
+                    f"run_step6_evaluation is set to at least 16."
+                )
             # ── NEW: persist trailing 4 backtest rows ─────────────────────
             # periods_ahead is negative to distinguish from forward rows.
             # -4 = 4 weeks before forecast start, -1 = 1 week before.
@@ -480,19 +518,29 @@ def build_pipeline_config(config: dict) -> dict:
     factors = set(config.get("external_factors", []))
     raw_period = config.get("time_period", "Whole Data Set (2013-Present)")
 
-    if raw_period == "7 Days": days = 7
-    elif raw_period == "14 Days": days = 14
-    elif raw_period == "21 Days": days = 21
-    elif raw_period == "30 Days": days = 30
-    elif raw_period == "90 Days": days = 90
-    else: days = 112 # Default 16 weeks
+    # time_period controls the TRAINING window (how much historical data to use),
+    # not the forecast horizon. The forecast horizon is always 16 weeks forward
+    # so the dashboard has a meaningful planning window regardless of training length.
+    # Minimum of 16 is enforced here.
+    #
+    # ISO 25010 → Functional Suitability: the system must always produce a
+    # useful planning horizon for the KJS manager.
+    FORECAST_HORIZON_WEEKS = 16
+
+    if raw_period == "7 Days": training_days = 7
+    elif raw_period == "14 Days": training_days = 14
+    elif raw_period == "21 Days": training_days = 21
+    elif raw_period == "30 Days": training_days = 30
+    elif raw_period == "90 Days": training_days = 90
+    else: training_days = None  # full dataset
 
     return {
         "use_exog": model == "SARIMAX",
         "use_holiday": "Holiday" in factors and model == "SARIMAX",
         "use_seasonality": model in ("SARIMA", "SARIMAX"),
         "forced_seasonal_order": (0, 0, 0, 0) if model == "ARIMA" else None,
-        "forecast_steps": math.ceil(days / 7)
+        "training_days": training_days,
+        "forecast_steps": FORECAST_HORIZON_WEEKS,   # always 16 — never derived from time_period
     }
 
 # ─────────────────────────────────────────────────────────────────────────────

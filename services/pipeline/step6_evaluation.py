@@ -166,7 +166,7 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
     for dt, actual_val in zip(test_wk.index, test_y_raw):
         # Date label format matches your frontend: "Sep W2", "Oct W1", etc.
         week_of_month = (dt.day - 1) // 7 + 1
-        date_label = f"{dt.strftime('%b')} W{week_of_month}"
+        date_label = f"{dt.strftime('%b')} W{week_of_month} {dt.year}"
         validation_graph.append({
             "date_label":  date_label,
             "actual":      int(round(float(actual_val))),

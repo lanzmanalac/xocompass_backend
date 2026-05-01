@@ -17,6 +17,7 @@ def compute_and_persist_dataset_snapshot(
     ingestion_batch_id: str,
     avg_lead_time_days: float | None = None,
     lead_time_distribution: list | None = None,
+    lead_time_by_year: dict | None = None,   # ← ADD THIS
     # ── MODIFIED: was top_airlines (flat list), now year-keyed dict ──────
     top_airlines_by_year: dict | None = None,
     # ── NEW parameters ────────────────────────────────────────────────────
@@ -156,6 +157,7 @@ def compute_and_persist_dataset_snapshot(
         non_holiday_week_count=non_holiday_week_count,
         avg_lead_time_days=avg_lead_time_days,
         lead_time_distribution_json=lead_time_distribution,
+        lead_time_by_year_json=lead_time_by_year,
         # ── MODIFIED: year-keyed dict replaces old flat list ──────────────
         top_airlines_json=top_airlines_by_year,
         # ── NEW columns ───────────────────────────────────────────────────

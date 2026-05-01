@@ -19,6 +19,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Optional
 from datetime import datetime, timedelta
 
+from math import sqrt
 from services.ingestion_service import ingest_csv
 
 # ── IMPORT OUR NEW STRICT DATA CONTRACTS ──
@@ -495,6 +496,8 @@ def get_business_analytics(
     # The trade-off: holiday counts per year are approximated from the
     # weekly records in TrainingDataLog. Acceptable for a dashboard KPI.
     total_weeks = snapshot.total_weekly_records or 1
+
+    year_records_filtered = []
     if resolved_year == "overall":
         h_weeks     = snapshot.holiday_week_count or 0
         non_h_weeks = snapshot.non_holiday_week_count or 0
@@ -564,6 +567,32 @@ def get_business_analytics(
             coverage_end   = snapshot.data_end_date
             coverage_span  = 0
 
+    # ── 8. Year-scoped lead time lookup ──────────────────────────────────
+    # ISO 25010 — Performance Efficiency > Time Behavior:
+    # lead_time_by_year_json is a pre-computed dict keyed by year string.
+    # Lookup is O(1). No DB query, no recomputation on the request path.
+    lead_time_blob = getattr(snapshot, "lead_time_by_year_json", None) or {}
+
+    if resolved_year == "overall" or not lead_time_blob:
+        scoped_avg_lead  = snapshot.avg_lead_time_days
+        scoped_lead_dist = [
+            LeadTimeBucket(**item)
+            for item in (snapshot.lead_time_distribution_json or [])
+        ]
+    else:
+        year_lead = lead_time_blob.get(resolved_year)
+        if year_lead:
+            scoped_avg_lead  = year_lead.get("avg")
+            scoped_lead_dist = [
+                LeadTimeBucket(**item)
+                for item in (year_lead.get("distribution") or [])
+            ]
+        else:
+            # Year exists in dataset but had no valid travel dates
+            scoped_avg_lead  = None
+            scoped_lead_dist = []
+
+
     return BusinessAnalyticsResponse(
         generated_at=snapshot.generated_at,
         total_transaction_count=snapshot.total_transaction_count or 0,
@@ -592,18 +621,15 @@ def get_business_analytics(
         revenue_by_month=[
             RevenueByMonth(**item)
             for item in (snapshot.revenue_by_month_json or [])
+            if resolved_year == "overall" or item.get("month", "").startswith(resolved_year)
         ],
-
         holiday_breakdown=HolidayBreakdown(
             holiday_weeks=h_weeks,
             non_holiday_weeks=non_h_weeks,
             holiday_pct=holiday_pct,
         ),
-        avg_lead_time_days=snapshot.avg_lead_time_days,
-        lead_time_distribution=[
-            LeadTimeBucket(**item)
-            for item in _slice(snapshot.lead_time_distribution_json)
-        ],
+        avg_lead_time_days=scoped_avg_lead,
+        lead_time_distribution=scoped_lead_dist,
         top_airlines=[
             AirlineCount(**item)
             for item in _slice(snapshot.top_airlines_json)
@@ -682,73 +708,65 @@ def get_advanced_metrics(model_id: int, db: Session = Depends(get_db)):
 
     )
 
+# ── Horizon constants (change here only, nowhere else) ────────────────────
+NEAR_HORIZON  = 2   # Weeks 1-2:  HIGH confidence tier
+TOTAL_HORIZON = 12  # Total weeks to surface (2 HIGH + 10 LOWER)
+
 @app.get("/api/forecast-outlook/{model_id}", response_model=ForecastOutlookResponse)
 def get_forecast_outlook(model_id: int, db: Session = Depends(get_db)):
     """
-    Tab 2: KPI cards + 12-week critical forecast weeks table.
-    Only queries FORWARD rows (periods_ahead > 0) — excludes BACKTEST rows.
+    Tab 2: Single endpoint serving KPI cards and Critical Forecast Weeks table.
+    One DB query — all aggregation derived in Python from the same in-memory list.
 
-    ISO 25010 Reliability → Fault Tolerance:
-      risk_flag null defaults to MEDIUM with debug log. Never 500s.
+    ISO 25010:
+      Performance Efficiency → Time Behavior:
+        1 DB query replaces 2. All aggregation is O(n) over ≤16 rows.
+      Reliability → Fault Tolerance:
+        Null risk_flag defaults to "MEDIUM" with a debug log trace.
+        Model existence validated before any cache query.
     """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
 
-    # Explicitly exclude BACKTEST rows from KPI and table calculations
     rows = (
         db.query(ForecastCache)
-        .filter(
-            ForecastCache.model_id == model_id,
-            ForecastCache.confidence_tier != "BACKTEST",
-        )
+        .filter(ForecastCache.model_id == model_id)
         .order_by(ForecastCache.forecast_date.asc())
         .all()
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="No forecast data found for this model.")
+        raise HTTPException(
+            status_code=404,
+            detail="No forecast data found for this model."
+        )
 
+    # ── KPI derivations (same list, zero additional DB queries) ───────────
     values = [r.predicted or 0.0 for r in rows]
-    forecasted_2w = int(sum(values[:2]))
+    forecasted_2w  = int(sum(values[:2]))
+    forecasted_10w = int(sum(values[:10]))
+
     peak_row = max(rows, key=lambda r: r.predicted or 0.0)
 
-    # Confidence tier thresholds — tune these to your CI width interpretation.
-    # Currently: weeks 1–2 = HIGH confidence, weeks 3+ = LOWER confidence.
-    # This mirrors the frontier your SARIMAX CI bands widen after week 2.
-    HIGH_CONFIDENCE_HORIZON = 2
-
+    # ── Critical weeks table ──────────────────────────────────────────────
     critical_weeks = []
-    for idx, r in enumerate(rows):
-        # ── Risk flag with defensive fallback ────────────────────────────
+    for r in rows:
         risk = r.risk_flag if r.risk_flag in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
         if r.risk_flag is None:
             logger.debug(
                 "forecast_cache id=%s has null risk_flag, defaulting to MEDIUM", r.id
             )
-
-        # ── Confidence tier: derived from forecast horizon position ──────
-        # Weeks 1–2 (idx 0,1): CI bands are narrow → HIGH confidence.
-        # Weeks 3+  (idx 2+):  CI bands widen with horizon → LOWER confidence.
-        # This is a direct reflection of SARIMAX's increasing uncertainty
-        # over multi-step forecasts — defensible at thesis defense.
-        confidence_tier = "HIGH" if idx < HIGH_CONFIDENCE_HORIZON else "LOWER"
-
-        # ── week_end: always Saturday/Sunday of the same ISO week ────────
-        # forecast_date is always a Monday (weekly freq anchor).
-        # Adding timedelta(days=6) gives the Sunday — the natural week boundary
-        # for a Mon–Sun travel industry week.
-        week_end = r.forecast_date + timedelta(days=6)
-
         critical_weeks.append(CriticalForecastWeek(
             week_start=r.forecast_date,
-            week_end=week_end,
+            week_end=r.forecast_date + timedelta(days=6),   # weekly cadence: Mon→Sun
             forecasted_volume=int(r.predicted or 0),
             risk_factor=risk,
-            confidence_tier=confidence_tier,
+            confidence_tier=r.confidence_tier if hasattr(r, "confidence_tier") and r.confidence_tier else None,
         ))
 
     return ForecastOutlookResponse(
         forecasted_bookings_2w=forecasted_2w,
+        forecasted_bookings_10w=forecasted_10w,
         highest_forecast_week_date=peak_row.forecast_date,
         highest_forecast_week_value=int(peak_row.predicted or 0),
         critical_weeks=critical_weeks,
@@ -797,61 +815,53 @@ async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(ge
 
 @app.get("/api/forecast-graph/{model_id}", response_model=ForecastGraphResponse)
 def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
-    """
-    Tab 2: Forecast graph — windowed view only.
-    Returns exactly 16 points:
-      - 4 BACKTEST rows: model predictions on trailing test-set weeks,
-        with actual booking values stored directly on the cache row.
-      - 2 HIGH rows: weather-backed forward forecast.
-      - 10 LOWER rows: climatological proxy forward forecast.
-    """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
 
-    cache_rows = (
-        db.query(ForecastCache)
-        .filter(ForecastCache.model_id == model_id)
-        .order_by(ForecastCache.forecast_date.asc())
-        .all()
-    )
-    if not cache_rows:
+    actuals = db.query(TrainingDataLog).order_by(
+        TrainingDataLog.record_date.asc()
+    ).all()
+
+    if not actuals:
+        raise HTTPException(status_code=404, detail="No historical booking data found.")
+
+    predictions = db.query(ForecastCache).filter(
+        ForecastCache.model_id == model_id
+    ).order_by(ForecastCache.forecast_date.asc()).all()
+
+    if not predictions:
         raise HTTPException(status_code=404, detail="No forecast data found for this model.")
 
-    # ── Separate BACKTEST from forward rows ───────────────────────────────
-    backtest_rows = [r for r in cache_rows if r.confidence_tier == "BACKTEST"]
-    forward_rows  = [r for r in cache_rows if r.confidence_tier != "BACKTEST"]
+    actual_dates = {r.record_date.date() for r in actuals}
 
     points = []
-
-    # ── BACKTEST rows — actual_bookings stored directly on the cache row ──
-    # No cross-table TrainingDataLog lookup needed anymore.
-    # actual_bookings was written by orchestrator.py at training time.
-    for r in backtest_rows:
+    for r in actuals:
         points.append(ForecastGraphPoint(
-            date=r.forecast_date,
-            actual=r.actual_bookings,
-            predicted=r.predicted,
-            lower_bound=r.lower_bound,
-            upper_bound=r.upper_bound,
-            confidence_tier=r.confidence_tier,
+            date=r.record_date,
+            actual=r.booking_value,
+            predicted=None,
+            lower_bound=None,
+            upper_bound=None
         ))
-
-    # ── Forward rows (HIGH + LOWER) — no actuals yet ──────────────────────
-    for r in forward_rows:
+    for p in predictions:
+        # Skip any forecast point whose date already exists in the actuals series.
+        if p.forecast_date.date() in actual_dates:
+            logger.debug(
+                "Skipping forecast point %s — date already present in actuals.",
+                p.forecast_date.date()
+            )
+            continue
         points.append(ForecastGraphPoint(
-            date=r.forecast_date,
+            date=p.forecast_date,
             actual=None,
-            predicted=r.predicted,
-            lower_bound=r.lower_bound,
-            upper_bound=r.upper_bound,
-            confidence_tier=r.confidence_tier,
+            predicted=p.predicted,
+            lower_bound=p.lower_bound,
+            upper_bound=p.upper_bound
         ))
-
-    # ── Sort chronologically ──────────────────────────────────────────────
-    points.sort(key=lambda p: p.date)
 
     return ForecastGraphResponse(data=points)
+
 
 @app.get("/api/strategic-actions/{model_id}", 
          response_model=StrategicActionsResponse)

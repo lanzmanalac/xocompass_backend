@@ -39,7 +39,8 @@ class SarimaxModel(Base):
     mae = Column(Float)
     rmse = Column(Float)
     mape = Column(Float)
-    wmape = Column(Float)
+    wmape     = Column(Float) 
+    sigma2 = Column(Float, nullable=True)
     
     # Training Dates
     train_start_date = Column(DateTime(timezone=True))
@@ -106,6 +107,7 @@ class DatasetSnapshot(Base):
 
     avg_lead_time_days         = Column(Float, nullable=True)
     lead_time_distribution_json = Column(JSON, nullable=True)
+    lead_time_by_year_json       = Column(JSON, nullable=True)  # ← ADD THIS
 
     # MODIFIED: now stores year-keyed dict {"overall": [...], "2013": [...]}
     # Old rows with a flat list will return their overall slice gracefully

@@ -143,6 +143,9 @@ def _compute_data_quality(df: pd.DataFrame, year_col: pd.Series) -> dict:
 
     return result
 
+avg_lead_time_days = None
+lead_time_distribution = None
+lead_time_by_year = None
 
 def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     ph_tz = ZoneInfo("Asia/Manila")
@@ -244,8 +247,6 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
     # ── Compute Lead Time (raw transaction level) ─────────────────────────
     # Lead time = how many days BEFORE travel date the customer booked.
     # Computed here from raw rows before weekly aggregation loses this info.
-    avg_lead_time_days = None
-    lead_time_distribution = None
 
     if travel_col:
         df['travel_date'] = pd.to_datetime(
@@ -260,30 +261,49 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
         if len(valid_lead) > 0:
             avg_lead_time_days = round(float(valid_lead.mean()), 1)
 
-            # Pre-bucket into histogram bins — server-side so frontend
-            # just renders bars. ISO 25010 → Performance Efficiency.
-            bins = [
-                (0,   7,   "0-7 days"),
-                (8,   14,  "8-14 days"),
-                (15,  30,  "15-30 days"),
-                (31,  60,  "31-60 days"),
-                (61,  90,  "61-90 days"),
-                (91,  float('inf'), "90+ days"),
-            ]
-            lead_time_distribution = []
-            for low, high, label in bins:
-                count = int(((valid_lead >= low) & (valid_lead <= high)).sum())
-                lead_time_distribution.append({
-                    "bucket": label,
-                    "count": count,
-                })
+            # Reusable bucketing helper defined inline to avoid a
+            # module-level function that ingestion_service doesn't
+            # otherwise need exposed.
+            # ISO 25010 — Maintainability > Reusability
+            def _bucket(series):
+                bins = [
+                    (0,   7,   "0-7 days"),
+                    (8,   14,  "8-14 days"),
+                    (15,  30,  "15-30 days"),
+                    (31,  60,  "31-60 days"),
+                    (61,  90,  "61-90 days"),
+                    (91,  float("inf"), "90+ days"),
+                ]
+                return [
+                    {"bucket": label, "count": int(((series >= low) & (series <= high)).sum())}
+                    for low, high, label in bins
+                ]
+
+            lead_time_distribution = _bucket(valid_lead)
+
+            # ── Per-year lead time breakdown ──────────────────────────
+            # ISO 25010 — Performance Efficiency > Time Behavior:
+            # Computed once at ingest time from the raw DataFrame while
+            # individual transaction rows still exist. After weekly
+            # aggregation this granularity is permanently lost.
+            # GET /api/business-analytics does a dict key lookup — O(1).
+            lead_time_by_year = {}
+            valid_df_for_year = df[
+                df["lead_time"].notna() & (df["lead_time"] >= 0)
+            ].copy()
+
+            for yr, grp in valid_df_for_year.groupby(valid_df_for_year["date"].dt.year):
+                yr_lead = grp["lead_time"]
+                lead_time_by_year[str(int(yr))] = {
+                    "avg": round(float(yr_lead.mean()), 1),
+                    "distribution": _bucket(yr_lead),
+                }
 
             print(f"   ⏱️  Avg lead time: {avg_lead_time_days} days "
                   f"({len(valid_lead):,} valid transactions)")
+            print(f"   📅  Per-year lead time: {list(lead_time_by_year.keys())}")
         else:
             print("   ⚠️  No valid lead time data found.")
-    else:
-        print("   ⚠️  No travel date column — lead time will not be computed.")
 
     # ── 3. Revenue computation ─────────────────────────────────────────────
     if revenue_col:
@@ -413,6 +433,7 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
         ingestion_batch_id,
         avg_lead_time_days=avg_lead_time_days,
         lead_time_distribution=lead_time_distribution,
+        lead_time_by_year=lead_time_by_year,        # ← ADD THIS LINE
         # ── MODIFIED: passing year-keyed dicts instead of flat lists ──
         top_airlines_by_year=top_airlines_by_year,      # ── NEW param name
         top_routes_by_year=top_routes_by_year,          # ── NEW
