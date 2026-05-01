@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, timezone
 
 from math import sqrt
 from services.ingestion_service import ingest_csv
@@ -822,33 +822,87 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
     actuals = db.query(TrainingDataLog).order_by(
         TrainingDataLog.record_date.asc()
     ).all()
-
     if not actuals:
         raise HTTPException(status_code=404, detail="No historical booking data found.")
 
     predictions = db.query(ForecastCache).filter(
         ForecastCache.model_id == model_id
     ).order_by(ForecastCache.forecast_date.asc()).all()
-
     if not predictions:
         raise HTTPException(status_code=404, detail="No forecast data found for this model.")
+
+    # ── Load validation_graph_json from ModelDiagnostic ───────────────────
+    # This is the full test-set prediction series already stored by the
+    # orchestrator from step6["validation_graph"]. It has actual, forecasted,
+    # lower_ci, upper_ci keyed by human-readable date labels like "Jul W2 2023".
+    # We build a lookup by parsing those labels back into calendar dates.
+    #
+    # This is the authoritative source for the test-set overlay — it covers
+    # all test weeks, unlike forecast_cache backtest rows which only store ~4.
+    #
+    # ISO 25010 → Functional Suitability: the chart shows model accuracy
+    # against real observed values across the full evaluation window.
+
+    diag = db.query(ModelDiagnostic).filter(
+        ModelDiagnostic.model_id == model_id
+    ).first()
+
+    validation_lookup: dict = {}
+    if diag and diag.validation_graph_json:
+        for item in diag.validation_graph_json:
+            # Parse "Jul W2 2023" → approximate calendar date for lookup
+            # Strategy: map to the Monday of the indicated week-of-month
+            try:
+                label = item["date_label"]           # e.g. "Jul W2 2023"
+                parts = label.split()                 # ["Jul", "W2", "2023"]
+                month_abbr = parts[0]
+                week_num   = int(parts[1][1])         # W2 → 2
+                year       = int(parts[2])
+
+                import calendar
+                month_num = list(calendar.month_abbr).index(month_abbr)
+
+                # Find the date of week_num-th Monday in that month/year
+                first_day = datetime(year, month_num, 1)
+                # Day of week: Monday=0 ... Sunday=6
+                first_monday_offset = (7 - first_day.weekday()) % 7
+                # If first_day is already Monday, offset=0
+                if first_day.weekday() == 0:
+                    first_monday_offset = 0
+                first_monday = first_day + timedelta(days=first_monday_offset)
+                target_monday = first_monday + timedelta(weeks=week_num - 1)
+
+                validation_lookup[target_monday.date()] = item
+            except Exception as e:
+                logger.debug("Could not parse validation_graph label '%s': %s",
+                             item.get("date_label"), e)
+
+    # ── Forward forecast rows only from ForecastCache ─────────────────────
+    forward_predictions = [p for p in predictions if (p.periods_ahead or 0) > 0]
 
     actual_dates = {r.record_date.date() for r in actuals}
 
     points = []
+
+    # ── Historical actuals — merge validation predictions where available ──
     for r in actuals:
+        date_key = r.record_date.date()
+        vg = validation_lookup.get(date_key)
+
         points.append(ForecastGraphPoint(
             date=r.record_date,
             actual=r.booking_value,
-            predicted=None,
-            lower_bound=None,
-            upper_bound=None
+            predicted=round(float(vg["forecasted"]), 2) if vg else None,
+            lower_bound=round(float(vg["lower_ci"]), 2) if vg else None,
+            upper_bound=round(float(vg["upper_ci"]), 2) if vg else None,
+            confidence_tier="BACKTEST" if vg else None,
         ))
-    for p in predictions:
-        # Skip any forecast point whose date already exists in the actuals series.
+
+    # ── Forward forecast rows ─────────────────────────────────────────────
+    for p in forward_predictions:
         if p.forecast_date.date() in actual_dates:
             logger.debug(
-                "Skipping forecast point %s — date already present in actuals.",
+                "Skipping forward forecast point %s — date already in actuals.",
                 p.forecast_date.date()
             )
             continue
@@ -857,11 +911,12 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
             actual=None,
             predicted=p.predicted,
             lower_bound=p.lower_bound,
-            upper_bound=p.upper_bound
+            upper_bound=p.upper_bound,
+            confidence_tier=p.confidence_tier,
         ))
 
     return ForecastGraphResponse(data=points)
-
+    
 
 @app.get("/api/strategic-actions/{model_id}", 
          response_model=StrategicActionsResponse)

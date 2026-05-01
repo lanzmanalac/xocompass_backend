@@ -151,6 +151,7 @@ class ForecastGraphPoint(BaseModel):
     predicted: Optional[float] = None
     lower_bound: Optional[float] = None
     upper_bound: Optional[float] = None
+    confidence_tier: Optional[str] = None   # ← must be here
 
 class ForecastGraphResponse(BaseModel):
     data: List[ForecastGraphPoint]
@@ -266,12 +267,11 @@ class ForecastGraphResponse(BaseModel):
 
 class CriticalForecastWeek(BaseModel):
     week_start: datetime
-    week_end: datetime
+    week_end: Optional[datetime] = None       # ← optional with default
     forecasted_volume: int
-    risk_factor: str                        # "HIGH" | "MEDIUM" | "LOW"
-    confidence_tier: str                    # so frontend can style HIGH vs LOWER weeks
-
-    model_config = ConfigDict(extra="forbid")
+    risk_factor: str                          # "HIGH" | "MEDIUM" | "LOW"
+    confidence_tier: Optional[str] = None    # ← optional with default
+    
 class ForecastOutlookResponse(BaseModel):
     """
     Single endpoint for all Tab 2 KPI cards + critical weeks table.
