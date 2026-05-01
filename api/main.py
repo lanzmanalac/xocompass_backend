@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from services.ingestion_service import ingest_csv
 
