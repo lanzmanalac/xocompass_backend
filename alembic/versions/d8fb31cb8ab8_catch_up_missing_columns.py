@@ -32,6 +32,9 @@ def upgrade() -> None:
     op.drop_column('sarimax_models', 'data_quality_pct')
     op.drop_column('sarimax_models', 'revenue_total')
     # ### end Alembic commands ###"""
+    op.add_column('forecast_cache', sa.Column('risk_flag', sa.String(length=10), nullable=True))
+    op.add_column('model_diagnostics', sa.Column('correlation_json', sa.JSON(), nullable=True))
+
 
 
 def downgrade() -> None:

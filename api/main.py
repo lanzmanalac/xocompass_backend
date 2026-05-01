@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from calendar import monthrange
+from sqlalchemy import inspect as sa_inspect
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
@@ -300,16 +301,44 @@ def get_model_registry(db: Session = Depends(get_db)):
 
 @app.get("/api/dashboard-stats/{model_id}", response_model=DashboardStatsResponse)
 def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
-    """Page 1: Returns the fast snapshot metrics for the dashboard."""
+    """
+    Page 1: Returns the fast snapshot metrics for the dashboard.
+
+    ISO 25010 — Reliability → Fault Tolerance:
+      Uses hasattr/getattr guards so that pre-migration model rows
+      (which lack KPI columns in the DB) return a structured 404
+      instead of an unhandled AttributeError that leaks a 500 trace.
+
+    ISO 25010 — Maintainability → Analysability:
+      The 'schema_incomplete' detail string tells ops exactly which
+      model row is broken and why, without exposing internal tracebacks.
+    """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
 
     if not model:
         raise HTTPException(status_code=404, detail="Model not found.")
 
-    if model.total_records is None:
+    # GUARD: Detect schema drift or pre-migration model rows.
+    # total_records is the sentinel — if it's missing or None, the KPI
+    # columns were never written by the orchestrator for this model.
+    if not hasattr(model, "total_records") or model.total_records is None:
+        logger.warning(
+            "Dashboard stats unavailable for model_id=%s: "
+            "KPI columns missing or unpopulated. "
+            "Run Alembic migrations and retrain.",
+            model_id,
+        )
         raise HTTPException(
             status_code=404,
-            detail="Snapshot not found for this model."
+            detail={
+                "code": "snapshot_missing",
+                "message": (
+                    f"Dashboard snapshot not available for model {model_id}. "
+                    "This model was created before KPI columns were added. "
+                    "Please retrain to generate dashboard data."
+                ),
+                "details": []
+            },
         )
 
     cache_rows = (
@@ -1021,4 +1050,30 @@ def debug_db_truth(db: Session = Depends(get_db)):
         "is_using_neon": "neon.tech" in str(db.get_bind().url)
     }
 
-    
+@app.get("/_debug/migration-check")
+def check_migration_state(db: Session = Depends(get_db)):
+    """
+    Verifies that all KPI columns from migration c1d2e3f4g5h6 exist
+    in the live sarimax_models table.
+
+    ISO 25010 — Reliability → Maturity:
+      Ops-level endpoint that confirms schema state without requiring
+      direct DB access. Should be called after every Cloud Run deploy.
+    """
+    required_columns = [
+        "total_records", "data_quality_pct", "revenue_total",
+        "growth_rate", "expected_bookings", "peak_travel_period",
+        "yearly_bookings_json",
+    ]
+    inspector = sa_inspect(db.bind)
+    existing = {
+        col["name"]
+        for col in inspector.get_columns("sarimax_models")
+    }
+    missing = [c for c in required_columns if c not in existing]
+
+    return {
+        "migration_c1d2e3f4g5h6_applied": len(missing) == 0,
+        "missing_columns": missing,
+        "existing_kpi_columns": [c for c in required_columns if c in existing],
+    }
