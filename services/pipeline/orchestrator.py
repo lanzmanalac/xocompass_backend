@@ -525,7 +525,7 @@ def build_pipeline_config(config: dict) -> dict:
     #
     # ISO 25010 → Functional Suitability: the system must always produce a
     # useful planning horizon for the KJS manager.
-    FORECAST_HORIZON_WEEKS = 16
+    FORECAST_HORIZON_WEEKS = 12
 
     if raw_period == "7 Days": training_days = 7
     elif raw_period == "14 Days": training_days = 14
