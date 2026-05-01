@@ -221,7 +221,10 @@ def ingest_csv(file_bytes: bytes, db: Session) -> dict:
             + df[dest_col].astype(str).str.strip().str.upper()
         )
         # Treat "NAN-NAN" as missing
-        df.loc[df['_route_clean'].str.contains('NAN'), '_route_clean'] = None
+        df.loc[
+            df['_route_clean'].str.contains(r'(^NAN-|^NAN$|-NAN$)', regex=True, na=False),
+            '_route_clean'
+        ] = None
         print(f"   Route column constructed from: {repr(origin_col)} + {repr(dest_col)}")
     else:
         df['_route_clean'] = None

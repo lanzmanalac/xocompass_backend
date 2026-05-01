@@ -373,38 +373,44 @@ def run_step6_evaluation(step1, step3, step5, forecast_steps: int = FORECAST_HOR
             "confidence_tier":      tier,            # ── NEW
         })
 
-    # ── NEW: Trailing 4 weeks of in-sample fitted values (BACKTEST rows) ──
-    # Calling get_prediction() with no arguments automatically uses the 
-    # model's internal training exog data, avoiding ValueError crashes.
-    in_sample_preds = fitted.get_prediction()
-    
-    # Extract mean and CI for the whole training set
-    fitted_series = in_sample_preds.predicted_mean.clip(lower=0)
-    in_sample_ci = in_sample_preds.conf_int(alpha=0.05)
-    
-    # Slice off just the trailing 4 weeks
-    trailing_fitted = fitted_series.iloc[-4:]
-    trailing_ci_lo = in_sample_ci.iloc[:, 0].clip(lower=0).iloc[-4:]
-    trailing_ci_hi = in_sample_ci.iloc[:, 1].clip(lower=0).iloc[-4:]
+    # ── Trailing 4 BACKTEST rows ──────────────────────────────────────────
+    # The trailing 4 weeks fall inside the test set, which is out-of-sample
+    # from the model's perspective. statsmodels get_prediction() for
+    # out-of-sample dates with exogenous variables requires passing the
+    # full exog sequence from train_end to the target date — not just 4 rows.
+    #
+    # Architectural decision: use test_pred_s (already computed above via
+    # fitted.forecast()) for the point estimate, and derive a symmetric CI
+    # from the model's average in-sample residual standard deviation.
+    # This is defensible for a diagnostic display — the user sees "how
+    # close was the model to reality recently," not a formal inference band.
+    full_w = step1["weekly_df"]
 
-    # Get the matching actuals
-    trailing_actuals = w["bookings_weekly"].loc[trailing_fitted.index]
+    # Point estimates: use the already-computed test set predictions
+    # test_pred_s covers the full test window; we take the last 4 weeks.
+    trailing_pred   = test_pred_s.iloc[-4:]
+    trailing_actual = full_w["bookings_weekly"].iloc[-4:]
+
+    # CI: use 1 residual standard deviation from the training residuals
+    # as a symmetric band. This is a conservative visual approximation.
+    resid_std = float(fitted.resid.std())
 
     backtest_payload = []
-    for i, (dt, fitted_val) in enumerate(trailing_fitted.items()):
-        actual_val = trailing_actuals.loc[dt]
+    for i, dt in enumerate(trailing_pred.index):
+        pred_val   = float(trailing_pred.iloc[i])
+        actual_val = float(trailing_actual.iloc[i])
         we = dt + timedelta(days=6)
         backtest_payload.append({
             "week_start":           dt.strftime("%Y-%m-%d"),
             "week_end":             we.strftime("%Y-%m-%d"),
-            "forecast_bookings":    int(round(fitted_val)),
-            "actual_bookings":      int(round(actual_val)),   
-            "confidence_lower_95":  int(round(trailing_ci_lo.loc[dt])),   # ── NOW HAS REAL C.I.
-            "confidence_upper_95":  int(round(trailing_ci_hi.loc[dt])),   # ── NOW HAS REAL C.I.
+            "forecast_bookings":    int(round(pred_val)),
+            "actual_bookings":      int(round(actual_val)),
+            "confidence_lower_95":  max(0, int(round(pred_val - 1.96 * resid_std))),
+            "confidence_upper_95":  int(round(pred_val + 1.96 * resid_std)),
             "holiday_lead_level":   0,
             "is_long_weekend":      0,
             "typhoon_climate_flag": 0,
-            "confidence_tier":      "BACKTEST",               
+            "confidence_tier":      "BACKTEST",
         })
 
     forecast_json = json.dumps(payload, indent=2)

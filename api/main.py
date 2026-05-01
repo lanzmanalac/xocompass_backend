@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+from calendar import monthrange
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
@@ -15,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Optional
+from datetime import datetime
 
 from services.ingestion_service import ingest_csv
 
@@ -504,7 +506,34 @@ def get_business_analytics(
     dq_slice = _slice(dq_blob, fallback=None)
     data_quality_obj = DataQualityReport(**dq_slice) if dq_slice else None
 
-    # ── 8. Assemble and return ────────────────────────────────────────────
+    # ── Date coverage scoping ─────────────────────────────────────────────
+    if resolved_year == "overall":
+        coverage_start = snapshot.data_start_date
+        coverage_end   = snapshot.data_end_date
+        coverage_span  = snapshot.span_weeks or 0
+    else:
+        year_months = [
+            item for item in (snapshot.bookings_by_month_json or [])
+            if item.get("month", "").startswith(resolved_year)
+        ]
+        if year_months:
+            first_month = year_months[0]["month"]
+            last_month  = year_months[-1]["month"]
+            coverage_start = datetime.strptime(first_month, "%Y-%m").replace(
+                tzinfo=snapshot.data_start_date.tzinfo
+            )
+            yr_int, mo_int = int(last_month[:4]), int(last_month[5:])
+            last_day = monthrange(yr_int, mo_int)[1]
+            coverage_end = datetime(
+                yr_int, mo_int, last_day,
+                tzinfo=snapshot.data_start_date.tzinfo
+            )
+            coverage_span = len(year_months)
+        else:
+            coverage_start = snapshot.data_start_date
+            coverage_end   = snapshot.data_end_date
+            coverage_span  = 0
+
     return BusinessAnalyticsResponse(
         generated_at=snapshot.generated_at,
         total_transaction_count=snapshot.total_transaction_count or 0,
@@ -515,17 +544,20 @@ def get_business_analytics(
         peak_week_bookings=snapshot.peak_week_bookings or 0,
         growth_rate=snapshot.growth_rate or 0.0,
         date_coverage=DateCoverage(
-            start_date=snapshot.data_start_date,
-            end_date=snapshot.data_end_date,
-            span_weeks=snapshot.span_weeks or 0,
+            start_date=coverage_start,
+            end_date=coverage_end,
+            span_weeks=coverage_span,
         ),
+
         bookings_by_year=[
             BookingsByYear(**item)
             for item in (snapshot.bookings_by_year_json or [])
+            if resolved_year == "overall" or item.get("year") == resolved_year
         ],
         bookings_by_month=[
             BookingsByMonth(**item)
             for item in (snapshot.bookings_by_month_json or [])
+            if resolved_year == "overall" or item.get("month", "").startswith(resolved_year)
         ],
         holiday_breakdown=HolidayBreakdown(
             holiday_weeks=h_weeks,
@@ -708,29 +740,17 @@ async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(ge
 @app.get("/api/forecast-graph/{model_id}", response_model=ForecastGraphResponse)
 def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
     """
-    Tab 2: Full graph timeline — actuals + backtest + forward forecast.
-
-    Row composition returned to frontend:
-      - All historical actuals from TrainingDataLog (actual populated, predicted None)
-      - 4 BACKTEST rows from forecast_cache (both actual + predicted populated)
-      - 12 forward forecast rows (predicted + CI, actual None)
-
-    confidence_tier field tells the frontend how to color each forecast segment.
-
-    ISO 25010 Performance Efficiency → Time Behavior:
-      Two queries (actuals + cache). No Python aggregation beyond list construction.
+    Tab 2: Forecast graph — windowed view only.
+    Returns exactly 16 points:
+      - 4 BACKTEST rows: model predictions on trailing test-set weeks,
+        with actual booking values stored directly on the cache row.
+      - 2 HIGH rows: weather-backed forward forecast.
+      - 10 LOWER rows: climatological proxy forward forecast.
     """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
 
-    actuals = db.query(TrainingDataLog).order_by(
-        TrainingDataLog.record_date.asc()
-    ).all()
-    if not actuals:
-        raise HTTPException(status_code=404, detail="No historical booking data found.")
-
-    # Fetch ALL cache rows (backtest + forward), sorted chronologically
     cache_rows = (
         db.query(ForecastCache)
         .filter(ForecastCache.model_id == model_id)
@@ -740,32 +760,41 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
     if not cache_rows:
         raise HTTPException(status_code=404, detail="No forecast data found for this model.")
 
+    # ── Separate BACKTEST from forward rows ───────────────────────────────
+    backtest_rows = [r for r in cache_rows if r.confidence_tier == "BACKTEST"]
+    forward_rows  = [r for r in cache_rows if r.confidence_tier != "BACKTEST"]
+
     points = []
 
-    # Historical actuals — no predicted, no confidence_tier
-    for r in actuals:
-        points.append(ForecastGraphPoint(
-            date=r.record_date,
-            actual=r.booking_value,
-            predicted=None,
-            lower_bound=None,
-            upper_bound=None,
-            confidence_tier=None,
-        ))
-
-    # Backtest + forward rows from cache — actual is None for forward rows
-    for r in cache_rows:
+    # ── BACKTEST rows — actual_bookings stored directly on the cache row ──
+    # No cross-table TrainingDataLog lookup needed anymore.
+    # actual_bookings was written by orchestrator.py at training time.
+    for r in backtest_rows:
         points.append(ForecastGraphPoint(
             date=r.forecast_date,
-            actual=None,                    # frontend overlays actual from the actuals list
+            actual=r.actual_bookings,
             predicted=r.predicted,
             lower_bound=r.lower_bound,
             upper_bound=r.upper_bound,
             confidence_tier=r.confidence_tier,
         ))
 
-    return ForecastGraphResponse(data=points)
+    # ── Forward rows (HIGH + LOWER) — no actuals yet ──────────────────────
+    for r in forward_rows:
+        points.append(ForecastGraphPoint(
+            date=r.forecast_date,
+            actual=None,
+            predicted=r.predicted,
+            lower_bound=r.lower_bound,
+            upper_bound=r.upper_bound,
+            confidence_tier=r.confidence_tier,
+        ))
 
+    # ── Sort chronologically ──────────────────────────────────────────────
+    points.sort(key=lambda p: p.date)
+
+    return ForecastGraphResponse(data=points)
+        
 @app.get("/api/strategic-actions/{model_id}", 
          response_model=StrategicActionsResponse)
 def get_strategic_actions(model_id: int, db: Session = Depends(get_db)):

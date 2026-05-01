@@ -430,12 +430,12 @@ def persist_to_neon(
                     predicted=item["forecast_bookings"],
                     lower_bound=item["confidence_lower_95"],
                     upper_bound=item["confidence_upper_95"],
-                    periods_ahead=-(4 - i),   # -4, -3, -2, -1
-                    risk_flag=None,            # no risk for backtest rows
+                    periods_ahead=-(4 - i),
+                    risk_flag=None,
                     confidence_tier="BACKTEST",
+                    actual_bookings=item.get("actual_bookings"),  # ── NEW
                     generated_at=datetime.now(ph_tz),
                 ))
-
             # 5. Insert KPI snapshot for Page 1 dashboard cards
             kpis = compute_snapshot_kpis(step1, step6, model_id)
             new_model.total_records = kpis["total_records"]

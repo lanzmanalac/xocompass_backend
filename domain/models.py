@@ -166,3 +166,4 @@ class ForecastCache(Base):
     risk_flag = Column(String(10), nullable=True)
 
     confidence_tier = Column(String(20), nullable=True)
+    actual_bookings = Column(Float, nullable=True)  # populated for BACKTEST rows only
