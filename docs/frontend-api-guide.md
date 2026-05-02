@@ -10,6 +10,62 @@ For offline/local checks, override the checked-in Neon connection string:
 DATABASE_URL=sqlite:///./xocompass.db .venv/bin/python -m uvicorn api.main:app --reload
 ```
 
+## Authentication & Authorization (Phase 5+)
+
+As of Phase 5, every `/api/*` endpoint requires a valid Bearer token.
+The `/health*` endpoints and `/docs`/`/openapi.json` remain public.
+
+### Login → Token
+
+```http
+POST /auth/login
+Content-Type: application/json
+
+{ "email": "<user>", "password": "<password>" }
+```
+
+Successful response includes `access_token`, `refresh_token`, both
+expiry timestamps, and the user's `role` ("ADMIN" | "ANALYST" | "VIEWER").
+
+### Authenticated requests
+
+Every `/api/*` and `/admin/*` request MUST carry:
+Authorization: Bearer <access_token>
+
+### Role requirements per route
+
+| Endpoint                            | Method | Required role           |
+|-------------------------------------|--------|-------------------------|
+| `/api/models`                       | GET    | any signed-in user      |
+| `/api/dashboard-stats/{id}`         | GET    | any signed-in user      |
+| `/api/business-analytics`           | GET    | any signed-in user      |
+| `/api/advanced-metrics/{id}`        | GET    | any signed-in user      |
+| `/api/forecast-outlook/{id}`        | GET    | any signed-in user      |
+| `/api/forecast-graph/{id}`          | GET    | any signed-in user      |
+| `/api/strategic-actions/{id}`       | GET    | any signed-in user      |
+| `/api/historical-data`              | GET    | any signed-in user      |
+| `/api/upload`                       | POST   | Admin or Analyst        |
+| `/api/retrain`                      | POST   | Admin or Analyst        |
+| `/api/models/{id}/rename`           | PATCH  | Admin or Analyst        |
+| `/api/models/{id}`                  | DELETE | **Admin only**          |
+| `/admin/*`                          | any    | Admin only (read settings: Analyst+) |
+
+### Failure modes
+
+- Missing or invalid token → `401` with `{"error":{"code":"request_failed","message":"Could not validate credentials.","details":[]}}`
+- Valid token, wrong role → `403` with `{"error":{"code":"request_failed","message":"Insufficient permissions for this operation.","details":[]}}`
+- Expired access token → `401`. The frontend should call `POST /auth/refresh` with the stored refresh token and retry the original request once.
+
+### Refresh flow
+
+```http
+POST /auth/refresh
+{ "refresh_token": "<refresh_token>" }
+```
+
+Returns a new pair of (access, refresh) tokens. **The old refresh token becomes invalid** — store the new one immediately. Replaying the old refresh token will trigger reuse-detection: ALL refresh tokens for the user are revoked, and the user must log in again.
+
+
 Notes:
 
 - The repo `.env` currently points to Neon/Postgres.
@@ -421,3 +477,5 @@ Unknown routes also use the shared error envelope:
 - Use the shared `error.code` and `error.message` fields for all handled failures.
 - Branch upload UX on `status: "success"` vs `status: "skipped"`.
 - Do not assume `/api/dashboard-stats/{model_id}` and `/api/forecast-graph/{model_id}` share the same chart granularity or field names.
+
+

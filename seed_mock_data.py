@@ -4,6 +4,117 @@ from zoneinfo import ZoneInfo
 from repository.model_repository import SessionLocal, engine
 from domain.models import Base, SarimaxModel, TrainingDataLog, ModelDiagnostic, ForecastCache
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 5 — Local-dev user seed.
+#
+# Creates deterministic Admin / Analyst / Viewer rows for local development
+# only. In production this function is a no-op.
+#
+# WHY DETERMINISTIC PASSWORDS:
+#   The seed is for `ENVIRONMENT=development` ONLY. The accounts live on
+#   the developer's local SQLite or Neon-dev DB, never in production.
+#   Phase 5 verification depends on these accounts existing with known
+#   credentials so smoke_test_rbac.py can run unattended.
+#
+# WHY NOT RUN IT IN PRODUCTION:
+#   Two safety layers: (1) the early return below, (2) the bootstrap_admin
+#   script's existing production guard. If both somehow fail, the worst
+#   outcome is three accounts with KNOWN passwords — which is why the
+#   logs scream loudly and the function refuses without an explicit env.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+import logging
+
+_seed_logger = logging.getLogger(__name__)
+
+
+def seed_local_dev_users(db) -> None:
+    """
+    Idempotent. Creates an Admin, Analyst, and Viewer if they don't exist.
+    SAFE to call multiple times.
+
+    Refuses to run unless ENVIRONMENT is explicitly 'development'. This is
+    the same guard pattern the bootstrap_admin script uses.
+    """
+    env = (os.getenv("ENVIRONMENT") or "development").strip().lower()
+    if env != "development":
+        _seed_logger.info(
+            "seed_local_dev_users: refusing to seed — ENVIRONMENT=%r (not 'development').",
+            env,
+        )
+        return
+
+    # Deferred imports to avoid forcing core.security to evaluate at module
+    # import time when the seed is being run in non-dev contexts.
+    from core.security import hash_password
+    from domain.auth_models import User, UserRole, AuditLog, AuditStatus
+
+    SEED_USERS = [
+        {
+            "email": "dev-admin@xocompass.dev",
+            "full_name": "Local Dev Admin",
+            "password": "DevAdmin_LongEnough_2026!",
+            "role": UserRole.ADMIN,
+        },
+        {
+            "email": "dev-analyst@xocompass.dev",
+            "full_name": "Local Dev Analyst",
+            "password": "DevAnalyst_LongEnough_2026!",
+            "role": UserRole.ANALYST,
+        },
+        {
+            "email": "dev-viewer@xocompass.dev",
+            "full_name": "Local Dev Viewer",
+            "password": "DevViewer_LongEnough_2026!",
+            "role": UserRole.VIEWER,
+        },
+    ]
+
+    created = 0
+    for spec in SEED_USERS:
+        existing = db.query(User).filter(User.email == spec["email"]).first()
+        if existing is not None:
+            continue
+
+        user = User(
+            email=spec["email"],
+            full_name=spec["full_name"],
+            hashed_password=hash_password(spec["password"]),
+            role=spec["role"],
+            is_active=True,
+            created_by_user_id=None,
+        )
+        db.add(user)
+        db.flush()
+
+        db.add(AuditLog(
+            user_id=user.id,
+            user_email_snapshot=user.email,
+            action_type="USER_CREATED",
+            module="bootstrap",
+            target_resource=f"user_id={user.id}",
+            status=AuditStatus.SUCCESS,
+            ip_address=None,
+            user_agent="seed_mock_data.py",
+            extra_metadata={
+                "method": "seed_local_dev_users",
+                "role": spec["role"].value,
+            },
+        ))
+        created += 1
+
+    db.commit()
+
+    if created > 0:
+        _seed_logger.warning(
+            "seed_local_dev_users: created %d local-dev users with KNOWN passwords. "
+            "DO NOT use in production.",
+            created,
+        )
+    else:
+        _seed_logger.info("seed_local_dev_users: all dev users already exist.")
+
 def seed_data():
     # 0. THE FIX: Force SQLAlchemy to build the tables if they are missing
     print("🏗️ Ensuring database tables exist...")
@@ -122,7 +233,7 @@ def seed_data():
             lower_bound=130.0 + (i * 10),
             upper_bound=170.0 + (i * 10),
             generated_at=now_ph,
-            periods_ahead=i+1
+            periods_ahead=i+1,
             risk_flag=MOCK_RISK_FLAGS[i],  # ← NEW
         )
         db.add(cache)
@@ -132,4 +243,11 @@ def seed_data():
     print("✅ Mock data successfully seeded! The database is ready for the API.")
 
 if __name__ == "__main__":
-    seed_data()
+    db = SessionLocal()
+    try:
+        # ── PHASE 5: local-dev user seed. No-op in non-development. ──
+        seed_local_dev_users(db)
+
+        seed_data()
+    finally:
+        db.close()
