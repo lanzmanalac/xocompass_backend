@@ -9,6 +9,27 @@ from dotenv import load_dotenv
 # 1. IMPORT YOUR NEW 5-TABLE ARCHITECTURE
 from domain.models import Base, SarimaxModel, ModelDiagnostic, ForecastCache, TrainingDataLog
 
+# 2. IMPORT THE ACCESS-CONTROL DOMAIN.
+#    Why this import lives here, not just in api/main.py:
+#      Alembic's `target_metadata = Base.metadata` (in alembic/env.py) only
+#      sees a model if its module has been imported by the time autogenerate
+#      runs. Importing `auth_models` here — in the same module that already
+#      anchors `Base` — guarantees that ANY entry point (the API, Alembic,
+#      the bootstrap script, the seed script) registers the auth tables
+#      with metadata as a side effect of touching the repository layer.
+#    The `# noqa: F401` annotations silence "imported but unused" linters;
+#    the import IS the side effect.
+from domain.auth_models import (  # noqa: F401
+    UserRole,
+    AuditStatus,
+    User,
+    InviteToken,
+    RefreshToken,
+    AuditLog,
+    GlobalSetting,
+)
+
+
 load_dotenv()
 # URL from .env (Neon DB)
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./xocompass.db")

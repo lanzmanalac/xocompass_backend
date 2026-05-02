@@ -20,24 +20,12 @@ def upgrade() -> None:
     # and read by GET /api/dashboard-stats/{model_id}.
     # Using IF NOT EXISTS logic via try/except to make this idempotent
     # in case some environments still have the columns.
-    conn = op.get_bind()
-    inspector = sa.inspect(conn)
-    existing_cols = {col['name'] for col in inspector.get_columns('sarimax_models')}
-
-    if 'total_records' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('total_records', sa.Integer(), nullable=True))
-    if 'data_quality_pct' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('data_quality_pct', sa.Float(), nullable=True))
-    if 'revenue_total' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('revenue_total', sa.Float(), nullable=True))
-    if 'growth_rate' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('growth_rate', sa.Float(), nullable=True))
-    if 'expected_bookings' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('expected_bookings', sa.Integer(), nullable=True))
-    if 'peak_travel_period' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('peak_travel_period', sa.String(100), nullable=True))
-    if 'yearly_bookings_json' not in existing_cols:
-        op.add_column('sarimax_models', sa.Column('yearly_bookings_json', sa.JSON(), nullable=True))
+    op.add_column('sarimax_models', sa.Column('total_records', sa.Integer(), nullable=True))
+    op.add_column('sarimax_models', sa.Column('data_quality_pct', sa.Float(), nullable=True))
+    op.add_column('sarimax_models', sa.Column('revenue_total', sa.Float(), nullable=True))
+    op.add_column('sarimax_models', sa.Column('growth_rate', sa.Float(), nullable=True))
+    op.add_column('sarimax_models', sa.Column('expected_bookings', sa.Integer(), nullable=True))
+    op.add_column('sarimax_models', sa.Column('peak_travel_period', sa.String(100), nullable=True))
 
 
 def downgrade() -> None:
