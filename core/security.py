@@ -34,6 +34,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
+import uuid
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -196,6 +197,7 @@ def create_access_token(*, subject: str, role: str) -> tuple[str, datetime]:
         "typ": TOKEN_TYPE_ACCESS,
         "iat": int(_utcnow().timestamp()),
         "exp": int(expires_at.timestamp()),
+        "jti": str(uuid.uuid4()) 
     }
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at
@@ -215,6 +217,7 @@ def create_refresh_token(*, subject: str) -> tuple[str, datetime]:
         "typ": TOKEN_TYPE_REFRESH,
         "iat": int(_utcnow().timestamp()),
         "exp": int(expires_at.timestamp()),
+        "jti": str(uuid.uuid4()),
     }
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at
