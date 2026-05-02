@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pandas.errors import EmptyDataError, ParserError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from jose import JWTError, ExpiredSignatureError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Optional
@@ -22,6 +23,8 @@ from datetime import datetime, timedelta, date, timezone
 from math import sqrt
 from services.ingestion_service import ingest_csv
 
+load_dotenv()
+
 # ── IMPORT OUR NEW STRICT DATA CONTRACTS ──
 from api.schemas import (
     ModelDropdownResponse, DashboardStatsResponse,
@@ -29,7 +32,7 @@ from api.schemas import (
     ModelDropdownItem, HistoricalDataPoint, ModelParams, ModelStatistics, ModelTests, AdvancedCharts,
     ForecastGraphPoint,
     ForecastGraphResponse,
-    StrategicActionsResponse,
+    StrategicActionsResponse, ModelRenameRequest,
     StrategicAction,
     RetrainRequest,
     RetrainStatusResponse,
@@ -55,11 +58,41 @@ from api.schemas import (
 
 )
 
+from services import audit_service
+from domain.auth_models import AuditStatus
+
 # ── IMPORT DATABASE ARCHITECTURE ──
 from repository.model_repository import SessionLocal
 from domain.models import SarimaxModel, DatasetSnapshot, ModelDiagnostic, TrainingDataLog, ForecastCache
 
-load_dotenv()
+# ── IMPORT AUTH ROUTER (Phase 2) ──
+# This import has a side effect: importing api.dependencies.auth will
+# evaluate core.security at module-load time, which triggers Phase 0's
+# _require_env guard against a missing JWT_SECRET_KEY. If the app starts
+# successfully, the JWT secret is provably configured. Fail-fast is a
+# feature, not a bug. ISO 25010 → Reliability → Fault Tolerance.
+from api.routers import auth as auth_router
+from api.routers import (  # Phase 4
+    admin_users as admin_users_router,
+    admin_invitations as admin_invitations_router,
+    admin_audit as admin_audit_router,
+    admin_system as admin_system_router,
+    admin_settings as admin_settings_router,
+)
+# ── PHASE 5: RBAC DEPENDENCIES ──
+from api.dependencies.auth import (
+    require_any,
+    require_analyst,
+    require_admin,
+)
+
+from domain.auth_models import User as AuthUser   # alias to avoid clashing with any existing local 'User' identifier
+
+# ── PHASE 6: RATE LIMITER ──
+from core.rate_limit import limiter, RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +138,9 @@ def _load_cors_origins() -> list[str]:
 def _error_code_for_status(status_code: int) -> str:
     return {
         400: "bad_request",
+        401: "request_failed",
         404: "not_found",
+        429: "rate_limited",
         500: "internal_server_error",
     }.get(status_code, "request_failed")
 
@@ -172,6 +207,45 @@ def _normalize_correlation_points(points: list[object] | None) -> list[Correlati
 
 app = FastAPI(title="XoCompass API", version="10.1")
 
+# ── PHASE 6: RATE LIMITER ──
+# `app.state.limiter` is how slowapi retrieves the Limiter instance
+# from inside its middleware. The middleware itself attaches the
+# X-RateLimit-* response headers and intercepts RateLimitExceeded.
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+@app.exception_handler(RateLimitExceeded)
+async def handle_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """
+    Surface 429 in the same {"error": {"code", "message", "details"}}
+    envelope every other handled error uses. The Retry-After header is
+    set by slowapi automatically.
+
+    ISO 25010 → Maintainability → Analyzability: one error format, app-wide.
+    """
+    del request
+    return _build_error_response(
+        status_code=429,
+        message="Too many requests. Please slow down and try again shortly.",
+        code="rate_limited",
+    )
+
+# ── MOUNT AUTH ROUTER (Phase 2) ──
+# All /auth/* endpoints are unauthenticated by design — they ARE the
+# authentication surface. The router itself uses get_current_user only
+# on /auth/me. No RBAC retrofit on existing endpoints in this phase;
+# Phase 5 handles that.
+app.include_router(auth_router.router)
+
+# Phase 4 — admin surface. Each router declares its own /admin/* prefix
+# and require_admin guard internally; mounting order is irrelevant for
+# behavior but kept stable for OpenAPI tag ordering.
+app.include_router(admin_users_router.router)
+app.include_router(admin_invitations_router.router)
+app.include_router(admin_audit_router.router)
+app.include_router(admin_system_router.router)
+app.include_router(admin_settings_router.router)
+
 # ════════════════════════════════════════════════════════════════════════════
 # 0. CONFIGURATION & DEPENDENCIES
 # ════════════════════════════════════════════════════════════════════════════
@@ -213,6 +287,32 @@ async def handle_validation_exception(
         code="bad_request",
     )
 
+# ── PHASE 6: AUTH ERROR HANDLERS ──
+# Catch JWT errors that escape the dependency layer (e.g., JWTError
+# raised from a service-layer decode that bypassed get_current_user).
+# Without these, such errors hit the catch-all 500 handler — wrong.
+# A bad token is a 401, not a server error.
+#
+# ISO 25010 → Reliability → Maturity: failures map to their semantic
+# HTTP code, not the catch-all.
+
+@app.exception_handler(ExpiredSignatureError)
+async def handle_expired_token(request: Request, exc: ExpiredSignatureError) -> JSONResponse:
+    del request, exc
+    return _build_error_response(
+        status_code=401,
+        message="Token has expired.",
+        code="token_expired",
+    )
+
+@app.exception_handler(JWTError)
+async def handle_jwt_error(request: Request, exc: JWTError) -> JSONResponse:
+    del request, exc
+    return _build_error_response(
+        status_code=401,
+        message="Could not validate credentials.",
+        code="request_failed",
+    )
 
 @app.exception_handler(SQLAlchemyError)
 async def handle_database_exception(
@@ -287,7 +387,11 @@ def database_healthcheck(db: Session = Depends(get_db)) -> DatabaseHealthRespons
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/models", response_model=ModelDropdownResponse)
-def get_model_registry(db: Session = Depends(get_db)):
+#def get_model_registry(db: Session = Depends(get_db)):
+def get_model_registry(
+    db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_any),
+):
     """Page 2: Populates the model selection dropdown."""
     models = db.query(SarimaxModel).all()
     if not models:
@@ -301,7 +405,12 @@ def get_model_registry(db: Session = Depends(get_db)):
     return ModelDropdownResponse(available_models=items)
 
 @app.get("/api/dashboard-stats/{model_id}", response_model=DashboardStatsResponse)
-def get_dashboard_stats(model_id: int, db: Session = Depends(get_db)):
+def get_dashboard_stats(
+    model_id: int,
+    db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_any),
+    ):
+
     """
     Page 1: Returns the fast snapshot metrics for the dashboard.
 
@@ -380,6 +489,7 @@ def get_business_analytics(
     model_id: Optional[int] = None,
     year: Optional[str] = None,          # ── NEW: "overall" | "2013" | "2014" | ...
     db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_any),
 ):
     """
     Tab 1: Business Analytics — year-aware via ?year= query parameter.
@@ -648,7 +758,11 @@ def get_business_analytics(
 
 @app.get("/api/advanced-metrics/{model_id}",
          response_model=AdvancedMetricsResponse)
-def get_advanced_metrics(model_id: int, db: Session = Depends(get_db)):
+def get_advanced_metrics(
+    model_id: int, 
+    db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_any),
+    ):
     """Page 2: Full statistical view for the MLOps panel."""
 
     model = db.query(SarimaxModel).filter(
@@ -713,7 +827,10 @@ NEAR_HORIZON  = 2   # Weeks 1-2:  HIGH confidence tier
 TOTAL_HORIZON = 12  # Total weeks to surface (2 HIGH + 10 LOWER)
 
 @app.get("/api/forecast-outlook/{model_id}", response_model=ForecastOutlookResponse)
-def get_forecast_outlook(model_id: int, db: Session = Depends(get_db)):
+def get_forecast_outlook(
+    model_id: int, db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_any),
+    ):
     """
     Tab 2: Single endpoint serving KPI cards and Critical Forecast Weeks table.
     One DB query — all aggregation derived in Python from the same in-memory list.
@@ -773,7 +890,7 @@ def get_forecast_outlook(model_id: int, db: Session = Depends(get_db)):
     )
 
 @app.get("/api/historical-data", response_model=HistoricalDataResponse)
-def get_historical_ledger(db: Session = Depends(get_db)):
+def get_historical_ledger(db: Session = Depends(get_db), _user: AuthUser = Depends(require_any),):
     records = db.query(TrainingDataLog).order_by(
         TrainingDataLog.record_date.asc()
     ).all()
@@ -793,17 +910,49 @@ def get_historical_ledger(db: Session = Depends(get_db)):
     return HistoricalDataResponse(data=points)
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Page 3: Safely ingests KJS CSV data and prevents duplicate dates."""
+async def upload_pos_data(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(require_analyst),   # ── PHASE 5 ──
+):
+    """Page 3: Safely ingests KJS CSV data and prevents duplicate dates.
+
+    Phase 5: now requires ADMIN or ANALYST role. Audit rows carry the
+    real actor; the `unauthenticated: true` marker is no longer added
+    (the actor is real and `audit_service` only adds the marker when
+    actor is None).
+    """
+    filename = file.filename or "<missing>"
+
     if not file.filename or not file.filename.lower().endswith(".csv"):
+        audit_service.log_action(
+            db,
+            action_type="DATA_UPLOAD_FAILED",
+            status=AuditStatus.FAILED,
+            actor=user,                          # ── PHASE 5 ──
+            target_resource={"filename": filename},
+            request=request,
+            metadata={"reason": "non_csv_filename"},
+        )
+        db.commit()
         raise HTTPException(status_code=400, detail="Only CSV files are allowed.")
 
     contents = await file.read()
     try:
         result = ingest_csv(contents, db)
-        return UploadResponse(**result)
     except (ValueError, EmptyDataError, ParserError) as exc:
         db.rollback()
+        audit_service.log_action(
+            db,
+            action_type="DATA_UPLOAD_FAILED",
+            status=AuditStatus.FAILED,
+            actor=user,                          # ── PHASE 5 ──
+            target_resource={"filename": filename},
+            request=request,
+            metadata={"reason": "parse_or_validation_error", "error": str(exc)[:240]},
+        )
+        db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except HTTPException:
         db.rollback()
@@ -811,10 +960,35 @@ async def upload_pos_data(file: UploadFile = File(...), db: Session = Depends(ge
     except Exception as exc:
         db.rollback()
         logger.exception("CSV ingestion failed.")
+        audit_service.log_action(
+            db,
+            action_type="DATA_UPLOAD_FAILED",
+            status=AuditStatus.FAILED,
+            actor=user,                          # ── PHASE 5 ──
+            target_resource={"filename": filename},
+            request=request,
+            metadata={"reason": "internal_error", "error_type": type(exc).__name__},
+        )
+        db.commit()
         raise HTTPException(status_code=500, detail="CSV ingestion failed.") from exc
 
+    audit_service.log_action(
+        db,
+        action_type="DATA_UPLOADED",
+        status=AuditStatus.SUCCESS,
+        actor=user,                              # ── PHASE 5 ──
+        target_resource={"filename": filename},
+        request=request,
+        metadata={
+            "status": result.get("status"),
+            "new_records": result.get("new_records"),
+        },
+    )
+    db.commit()
+    return UploadResponse(**result)
+
 @app.get("/api/forecast-graph/{model_id}", response_model=ForecastGraphResponse)
-def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
+def get_forecast_graph(model_id: int, db: Session = Depends(get_db), _user: AuthUser = Depends(require_any),):
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found.")
@@ -920,7 +1094,7 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/strategic-actions/{model_id}", 
          response_model=StrategicActionsResponse)
-def get_strategic_actions(model_id: int, db: Session = Depends(get_db)):
+def get_strategic_actions(model_id: int, db: Session = Depends(get_db), _user: AuthUser = Depends(require_any),):
     """
     Page 1: Prescriptive analytics.
     Derives actionable recommendations from forecast_cache data.
@@ -995,11 +1169,24 @@ def get_strategic_actions(model_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/retrain", response_model=RetrainStatusResponse)
 def trigger_retrain(
-    request: RetrainRequest,
-    db: Session = Depends(get_db)
+    body: RetrainRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(require_analyst),
 ):
+    """
+    Phase 3: every retrain — successful or failed — writes an audit row.
+    The action_type is FORECAST_RUN on success, FORECAST_FAILED otherwise.
+    The audit row's metadata captures the request payload (which exog
+    factors, which model selection) so a future "why was this model
+    trained?" investigation has the inputs preserved.
+
+    Phase 5: requires Admin or Analyst. Every retrain — successful or failed —
+    writes an audit row attributing the actor.
+    """
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    config_json_string = request.model_dump_json()
+    config_json_string = body.model_dump_json()
+    started_at = datetime.now(timezone.utc)
 
     try:
         result = subprocess.run(
@@ -1008,9 +1195,8 @@ def trigger_retrain(
             cwd=project_root,
             capture_output=True,
             text=True,
-            timeout=1500            
+            timeout=1500,
         )
-        # Force the hidden logs to print to Google Cloud Run
         print("=== ORCHESTRATOR STDOUT ===", flush=True)
         print(result.stdout, flush=True)
         print("=== ORCHESTRATOR STDERR ===", flush=True)
@@ -1018,24 +1204,63 @@ def trigger_retrain(
 
         if result.returncode != 0:
             logger.error("Retraining pipeline failed: %s", result.stderr[-500:])
-            raise HTTPException(
-                status_code=500,
-                detail="Model retraining failed."
+            audit_service.log_action(
+                db,
+                action_type="FORECAST_FAILED",
+                status=AuditStatus.FAILED,
+                actor=None,
+                request=request,
+                metadata={
+                    "model_selection": body.model_selection,
+                    "time_period": body.time_period,
+                    "external_factors": body.external_factors,
+                    "returncode": result.returncode,
+                    "stderr_tail": (result.stderr or "")[-500:],
+                    "duration_seconds": (datetime.now(timezone.utc) - started_at).total_seconds(),
+                },
             )
+            db.commit()
+            raise HTTPException(status_code=500, detail="Model retraining failed.")
+
     except subprocess.TimeoutExpired as exc:
         logger.exception("Retraining pipeline timed out.")
+        audit_service.log_action(
+            db,
+            action_type="FORECAST_FAILED",
+            status=AuditStatus.FAILED,
+            actor=None,
+            request=request,
+            metadata={
+                "model_selection": body.model_selection,
+                "reason": "timeout",
+                "timeout_seconds": 1500,
+            },
+        )
+        db.commit()
         raise HTTPException(
             status_code=500,
             detail="Model retraining timed out after 25 minutes.",
         ) from exc
     except OSError as exc:
         logger.exception("Retraining pipeline could not be started.")
+        audit_service.log_action(
+            db,
+            action_type="FORECAST_FAILED",
+            status=AuditStatus.FAILED,
+            actor=None,
+            request=request,
+            metadata={
+                "model_selection": body.model_selection,
+                "reason": "subprocess_failed_to_start",
+                "error_type": type(exc).__name__,
+            },
+        )
+        db.commit()
         raise HTTPException(
             status_code=500,
             detail="Model retraining could not be started.",
         ) from exc
 
-    # Force the DB connection to wake up and look at the present!
     db.commit()
     db.expire_all()
 
@@ -1043,102 +1268,217 @@ def trigger_retrain(
         SarimaxModel.is_active == True).first()
 
     if not new_model:
+        audit_service.log_action(
+            db,
+            action_type="FORECAST_FAILED",
+            status=AuditStatus.FAILED,
+            actor=None,
+            request=request,
+            metadata={
+                "reason": "post_pipeline_no_active_model",
+                "model_selection": body.model_selection,
+            },
+        )
+        db.commit()
         raise HTTPException(
             status_code=500,
             detail="Model retraining finished but no active model was found.",
         )
 
+    new_records_used = db.query(TrainingDataLog).count()
+
+    # ── Success audit ──────────────────────────────────────────────────────
+    audit_service.log_action(
+        db,
+        action_type="FORECAST_RUN",
+        status=AuditStatus.SUCCESS,
+        actor=None,
+        target_resource={"model_id": new_model.id, "model_name": new_model.model_name},
+        request=request,
+        metadata={
+            "model_selection": body.model_selection,
+            "time_period": body.time_period,
+            "external_factors": body.external_factors,
+            "new_records_used": new_records_used,
+            "aic_score": new_model.aic_score,
+            "duration_seconds": (datetime.now(timezone.utc) - started_at).total_seconds(),
+        },
+    )
+    db.commit()
+
     return RetrainStatusResponse(
         status="success",
         message=f"Model retrained successfully. New Model ID: {new_model.id}",
-        new_records_used=db.query(TrainingDataLog).count()
+        new_records_used=new_records_used,
     )
-
-from api.schemas import ModelRenameRequest 
 
 # ── 1. RENAME ENDPOINT ──
 @app.patch("/api/models/{model_id}/rename")
-def rename_model(model_id: int, request: ModelRenameRequest, db: Session = Depends(get_db)):
-    """Page 2: Renames a specific model in the registry."""
+def rename_model(
+    model_id: int,
+    body: ModelRenameRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(require_analyst),
+):
+    """
+    Page 2: Renames a specific model in the registry.
+
+    Phase 3: every successful rename writes a MODEL_RENAMED audit row
+    with both the old and the new name. The audit log preserves rename
+    history that the SarimaxModel row itself does not — once you've
+    renamed Model #42 from "v10.1-experimental" to "production",
+    the column shows the new name and history is lost without the audit.
+
+    Phase 5 will add Depends(require_analyst); today actor=None.
+    """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
-    
     if not model:
         raise HTTPException(status_code=404, detail="Model not found.")
-        
+
     old_name = model.model_name
-    model.model_name = request.new_model_name
+    new_name = body.new_model_name
+
+    if old_name == new_name:
+        # No-op rename — audit it as SUCCESS for completeness, but with
+        # a `noop: true` marker so dashboards can filter it out.
+        audit_service.log_action(
+            db,
+            action_type="MODEL_RENAMED",
+            status=AuditStatus.SUCCESS,
+            actor=None,
+            target_resource={"model_id": model.id},
+            request=request,
+            metadata={"old_name": old_name, "new_name": new_name, "noop": True},
+        )
+        db.commit()
+        return {
+            "status": "success",
+            "message": f"Model '{old_name}' name unchanged.",
+        }
+
+    model.model_name = new_name
+
+    audit_service.log_action(
+        db,
+        action_type="MODEL_RENAMED",
+        status=AuditStatus.SUCCESS,
+        actor=None,
+        target_resource={"model_id": model.id, "model_name": new_name},
+        request=request,
+        metadata={"old_name": old_name, "new_name": new_name},
+    )
     db.commit()
-    
-    return {"status": "success", "message": f"Model '{old_name}' renamed to '{request.new_model_name}'"}
 
+    return {
+        "status": "success",
+        "message": f"Model '{old_name}' renamed to '{new_name}'",
+    }
 
-# ── 2. DELETE ENDPOINT (Safe Deletion) ──
-import os
 
 @app.delete("/api/models/{model_id}")
-def delete_model(model_id: int, db: Session = Depends(get_db)):
-    # 1. Find the model
+def delete_model(
+    model_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(require_admin),
+):
+    """
+    Phase 3: every successful deletion writes a MODEL_DELETED audit row
+    with the model_name and key metadata captured BEFORE the delete —
+    forensic preservation of "what was here." Cascade also wipes
+    ModelDiagnostic and ForecastCache rows; their counts go in metadata.
+
+    Phase 5 will add Depends(require_admin); today actor=None.
+    """
     model = db.query(SarimaxModel).filter(SarimaxModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # 2. Physically delete the .joblib file from your Mac/Server so it doesn't clog storage
+    # Snapshot identifying details BEFORE the delete. Once db.delete(model)
+    # commits, the ORM object is detached and these attribute reads can
+    # raise. Capture eagerly.
+    snapshot = {
+        "model_id": model.id,
+        "model_name": model.model_name,
+        "pipeline_ver": model.pipeline_ver,
+        "aic_score": model.aic_score,
+        "is_active": bool(model.is_active),
+        "model_path": model.model_path,
+    }
+
+    # File deletion is best-effort — failure here doesn't block DB deletion.
+    file_removed = False
     if model.model_path and os.path.exists(model.model_path):
         try:
             os.remove(model.model_path)
+            file_removed = True
         except Exception as e:
             print(f"Warning: Could not delete model file {model.model_path}: {e}")
 
-    # 3. Nuke the model from the database
-    # (Because of cascade="all, delete-orphan" in models.py, this single line 
-    # automatically destroys the associated ModelDiagnostic and ForecastCache records too!)
     db.delete(model)
+
+    audit_service.log_action(
+        db,
+        action_type="MODEL_DELETED",
+        status=AuditStatus.SUCCESS,
+        actor=None,
+        target_resource={"model_id": snapshot["model_id"], "model_name": snapshot["model_name"]},
+        request=request,
+        metadata={
+            **snapshot,
+            "file_removed": file_removed,
+        },
+    )
     db.commit()
 
     return {"message": f"Model {model_id} and all its data were successfully obliterated."}
-from sqlalchemy import text
-
-@app.get("/_debug/db-truth")
-def debug_db_truth(db: Session = Depends(get_db)):
-    """Verifies which DB the app is actually reading from."""
-    result = db.execute(text("""
-        SELECT 
-            current_database() AS db_name,
-            inet_server_addr() AS server_ip,
-            (SELECT COUNT(*) FROM sarimax_models) AS model_count
-    """)).fetchone()
     
-    return {
-        "connected_to_db": result[0],
-        "server_internal_ip": str(result[1]),
-        "models_found_in_this_db": result[2],
-        "is_using_neon": "neon.tech" in str(db.get_bind().url)
-    }
 
-@app.get("/_debug/migration-check")
-def check_migration_state(db: Session = Depends(get_db)):
-    """
-    Verifies that all KPI columns from migration c1d2e3f4g5h6 exist
-    in the live sarimax_models table.
+# ─────────────────────────────────────────────────────────────────────────────
+# DEBUG ENDPOINTS — Phase 5
+#
+# Gated by BOTH:
+#   1. ENVIRONMENT != "production" — refuses to even register the route
+#      in production. The endpoint literally does not exist on prod
+#      revisions; a probe gets a 404, not a 403, eliminating the
+#      "this resource exists but you can't reach it" leak.
+#   2. require_admin — even in development, only Admins see the truth
+#      of what DB we're talking to.
+#
+# ISO 25010 → Security → Confidentiality at the deployment boundary.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    ISO 25010 — Reliability → Maturity:
-      Ops-level endpoint that confirms schema state without requiring
-      direct DB access. Should be called after every Cloud Run deploy.
-    """
-    required_columns = [
-        "total_records", "data_quality_pct", "revenue_total",
-        "growth_rate", "expected_bookings", "peak_travel_period",
-        "yearly_bookings_json",
-    ]
-    inspector = sa_inspect(db.bind)
-    existing = {
-        col["name"]
-        for col in inspector.get_columns("sarimax_models")
-    }
-    missing = [c for c in required_columns if c not in existing]
+_ENVIRONMENT = (os.getenv("ENVIRONMENT") or "development").strip().lower()
+_DEBUG_ROUTES_ENABLED = _ENVIRONMENT != "production"
 
-    return {
-        "migration_c1d2e3f4g5h6_applied": len(missing) == 0,
-        "missing_columns": missing,
-        "existing_kpi_columns": [c for c in required_columns if c in existing],
-    }
+
+if _DEBUG_ROUTES_ENABLED:
+    @app.get("/_debug/db-truth")
+    def debug_db_truth(
+        db: Session = Depends(get_db),
+        _admin: AuthUser = Depends(require_admin),
+    ):
+        """Verifies which DB the app is actually reading from.
+        Available only when ENVIRONMENT != 'production' AND caller is Admin."""
+        result = db.execute(text("""
+            SELECT
+                current_database() AS db_name,
+                inet_server_addr() AS server_ip,
+                (SELECT COUNT(*) FROM sarimax_models) AS model_count
+        """)).fetchone()
+
+        return {
+            "connected_to_db": result[0],
+            "server_internal_ip": str(result[1]),
+            "models_found_in_this_db": result[2],
+            "is_using_neon": "neon.tech" in str(db.get_bind().url),
+            "environment": _ENVIRONMENT,
+        }
+else:
+    # Production: the /_debug/db-truth path is intentionally not registered.
+    # A probe receives 404, indistinguishable from a typo.
+    logger.info(
+        "_debug routes are DISABLED for environment=%s. /_debug/* returns 404.",
+        _ENVIRONMENT,
+    )
