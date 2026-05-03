@@ -27,6 +27,7 @@ from domain.auth_models import (  # noqa: F401
     RefreshToken,
     AuditLog,
     GlobalSetting,
+    PasswordResetToken,
 )
 
 

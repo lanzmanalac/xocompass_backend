@@ -187,7 +187,6 @@ DEFAULT_MODULE: Final[dict[str, str]] = {
     "ADMIN_PASSWORD_RESET_INITIATED": "user_management",
     "PASSWORD_RESET_COMPLETED": "auth",
     "PASSWORD_RESET_FAILED": "auth",
-
     "USER_DELETED": "user_management",
 
 
