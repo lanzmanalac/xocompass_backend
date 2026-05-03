@@ -1,6 +1,9 @@
-from pydantic import BaseModel, Field, ConfigDict, field_validator
-from typing import List, Optional, Literal
+from pydantic import BaseModel, Field, ConfigDict, field_validator, EmailStr
+from typing import List, Optional, Literal, Any
 from datetime import datetime, timedelta
+
+from uuid import UUID
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # PASSWORD POLICY CONSTANTS — defined at module top so all schemas
@@ -364,9 +367,6 @@ class AdvancedMetricsResponse(BaseModel):
 #     ISO 25010 → Maintainability → Analyzability.
 # ════════════════════════════════════════════════════════════════════════════
 
-from pydantic import EmailStr, ConfigDict
-from uuid import UUID
-
 
 # ── Login ───────────────────────────────────────────────────────────────────
 
@@ -526,17 +526,13 @@ class MeResponse(AuthenticatedUser):
 #     tables, paginator-friendly)
 # ════════════════════════════════════════════════════════════════════════════
 
-from typing import Any
-from pydantic import field_validator
-
-
 # ── Admin: Users ────────────────────────────────────────────────────────────
 
 class AdminUserListItem(BaseModel):
     """User row as seen in the admin table. Excludes hashed_password."""
     id: UUID
-    email: EmailStr
-    full_name: str
+    email: str
+    full_name: Optional[str]
     role: Literal["ADMIN", "ANALYST", "VIEWER"]
     is_active: bool
     last_login_at: Optional[datetime] = None
