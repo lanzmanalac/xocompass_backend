@@ -578,3 +578,75 @@ def fetch_recent_audit_rows(db: Session, limit: int = 20) -> list[AuditLog]:
         .limit(limit)
         .all()
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PASSWORD RESET QUERIES
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def insert_password_reset_token(
+    db: Session,
+    *,
+    user_id: UUID,
+    token_hash: str,
+    expires_at: datetime,
+    initiated_by_user_id: Optional[UUID] = None,
+    ip_address: Optional[str] = None,
+):
+    """Caller commits."""
+    from domain.auth_models import PasswordResetToken
+    row = PasswordResetToken(
+        user_id=user_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        initiated_by_user_id=initiated_by_user_id,
+        ip_address_initiated=ip_address,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def fetch_password_reset_by_hash_for_update(
+    db: Session, token_hash: str
+):
+    """SELECT ... FOR UPDATE. See fetch_invite_by_hash_for_update for rationale."""
+    from domain.auth_models import PasswordResetToken
+    return (
+        db.query(PasswordResetToken)
+        .filter(PasswordResetToken.token_hash == token_hash)
+        .with_for_update()
+        .one_or_none()
+    )
+
+
+def fetch_pending_reset_for_user(db: Session, user_id: UUID):
+    """Used for the rate-limit guard: max one active reset per user."""
+    from domain.auth_models import PasswordResetToken
+    now = datetime.now(timezone.utc)
+    return (
+        db.query(PasswordResetToken)
+        .filter(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.consumed_at.is_(None),
+            PasswordResetToken.expires_at > now,
+        )
+        .first()
+    )
+
+
+def revoke_pending_resets_for_user(db: Session, user_id: UUID) -> int:
+    """When admin initiates a fresh reset, expire any pending self-service ones.
+    Returns count revoked. Caller commits."""
+    from domain.auth_models import PasswordResetToken
+    now = datetime.now(timezone.utc)
+    count = (
+        db.query(PasswordResetToken)
+        .filter(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.consumed_at.is_(None),
+            PasswordResetToken.expires_at > now,
+        )
+        .update({"expires_at": now}, synchronize_session=False)
+    )
+    return int(count)

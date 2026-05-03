@@ -272,21 +272,65 @@ async def handle_http_exception(
 async def handle_validation_exception(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    """
+    Convert Pydantic validation errors into the standard error envelope,
+    with SPECIAL HANDLING for password-strength errors so the user sees
+    the friendly copy instead of "value error, Password must be...".
+    
+    ISO 25010 → Usability → User Error Protection:
+        Generic Pydantic errors are technical debt leaking to the user.
+        We translate them into domain-meaningful messages.
+    
+    ISO 25010 → Maintainability → Analyzability:
+        The validation_errors_lookup makes the field-to-message mapping
+        explicit. Adding a new field-specific friendly error is one entry.
+    """
     del request
 
-    details = []
+    # Field paths whose `value_error` should be surfaced as the PRIMARY
+    # message instead of being lumped into details[]. The Pydantic
+    # validator's ValueError message becomes the user-facing copy.
+    PRIMARY_MESSAGE_FIELDS = {
+        "password",          # RegisterRequest.password
+        "new_password",      # ResetPasswordRequest.new_password
+    }
+
+    primary_message: str | None = None
+    details: list[str] = []
+
     for error in exc.errors():
-        location = ".".join(str(part) for part in error.get("loc", []))
+        location_parts = [str(part) for part in error.get("loc", []) if part != "body"]
+        location = ".".join(location_parts)
         message = error.get("msg", "Invalid request.")
+        error_type = error.get("type", "")
+
+        # Pydantic v2 prefixes value_error messages with "Value error, ".
+        # Strip that so the user sees just our message.
+        if message.startswith("Value error, "):
+            message = message[len("Value error, "):]
+
+        # If this is a field whose error message we want to PROMOTE to the
+        # top-level "message", do so on the first match. Subsequent
+        # validation errors still go into details[] for context.
+        leaf_field = location_parts[-1] if location_parts else ""
+        if (
+            primary_message is None
+            and leaf_field in PRIMARY_MESSAGE_FIELDS
+            and error_type == "value_error"
+        ):
+            primary_message = message
+            continue
+
+        # Standard handling for all other validation errors.
         details.append(f"{location}: {message}" if location else message)
 
     return _build_error_response(
         status_code=400,
-        message="Request validation failed.",
+        message=primary_message or "Request validation failed.",
         details=details,
         code="bad_request",
     )
-
+    
 # ── PHASE 6: AUTH ERROR HANDLERS ──
 # Catch JWT errors that escape the dependency layer (e.g., JWTError
 # raised from a service-layer decode that bypassed get_current_user).

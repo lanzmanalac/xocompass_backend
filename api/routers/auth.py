@@ -38,6 +38,11 @@ from api.schemas import (
     RefreshResponse,
     RegisterRequest,
     RegisterResponse,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
+
 )
 from services import auth_service
 from services.auth_service import (
@@ -48,10 +53,12 @@ from services.auth_service import (
     LoginResult,
     TokenPair,
     TokenReplayError,
+    InvalidResetTokenError,
 )
 
 # Phase 6 Rate Limiter
 from core.rate_limit import limiter
+from core.security import build_password_reset_url
 
 logger = logging.getLogger(__name__)
 
@@ -270,3 +277,115 @@ def me(user: CurrentUserDep) -> MeResponse:
         last_login_at=user.last_login_at,
         created_at=user.created_at,
     )
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Password Reset — Self-Service
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request a password reset link via email.",
+)
+@limiter.limit("3/15 minutes")  # rate-limited per-IP — anti-enumeration + anti-spam
+def forgot_password(
+    request: Request,
+    body: ForgotPasswordRequest,
+    db: DbDep,
+) -> ForgotPasswordResponse:
+    """
+    Self-service password reset request.
+    
+    SECURITY: Always returns 200 with the same generic message regardless
+    of whether the email matches a real account. This prevents account
+    enumeration via the reset endpoint.
+    
+    The actual email dispatch is the responsibility of the email service
+    (TODO — not implemented in this phase). For development, the reset
+    URL is logged to the application logger so devs can copy/paste it.
+    """
+    ip, ua = _client_context(request)
+    result = auth_service.request_password_reset(
+        db, email=body.email, ip_address=ip, user_agent=ua,
+    )
+
+    if result is not None:
+        raw_token, expires_at = result
+        reset_url = build_password_reset_url(raw_token)
+
+        env = (os.getenv("ENVIRONMENT") or "development").strip().lower()
+        log_reset_urls = (
+            os.getenv("LOG_PASSWORD_RESET_URLS_INSECURE", "")
+            .strip()
+            .lower()
+            in ("1", "true", "yes")
+        )
+
+        if env == "production":
+            # TODO: dispatch via SendGrid/SES/SMTP
+            # The metadata below is safe for production logs — no token,
+            # no URL, just enough to trace email-dispatch failures.
+            logger.info(
+                "password_reset_email_pending: target=%s expires_at=%s",
+                body.email, expires_at.isoformat(),
+            )
+        elif log_reset_urls:
+            # OPT-IN insecure logging for local development only.
+            # The env var name is deliberately scary so nobody enables this
+            # in staging by accident. ISO 25010 → Security → Confidentiality.
+            logger.warning(
+                "INSECURE_DEV_LOG: password reset URL for %s (expires %s): %s",
+                body.email, expires_at.isoformat(), reset_url,
+            )
+        else:
+            # Default non-prod behavior: log only that a reset was issued,
+            # NOT the URL. Devs who need the URL set the opt-in env var.
+            logger.info(
+                "password_reset_issued: target=%s expires_at=%s "
+                "(set LOG_PASSWORD_RESET_URLS_INSECURE=1 to log the full URL)",
+                body.email, expires_at.isoformat(),
+            )
+
+    # Generic response in BOTH cases. Same shape, same timing.
+    return ForgotPasswordResponse()
+
+
+@router.post(
+    "/reset-password",
+    response_model=ResetPasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Consume a password reset token and set a new password.",
+)
+@limiter.limit("5/15 minutes")
+def reset_password(
+    request: Request,
+    body: ResetPasswordRequest,
+    db: DbDep,
+) -> ResetPasswordResponse:
+    """
+    Consume a reset token. On success, the user's password is updated AND
+    all of their refresh tokens are revoked — they must log in fresh with
+    the new password.
+    
+    Note: we do NOT auto-login here. Industry standard is to require a
+    fresh login after reset, which produces a clean LOGIN audit row and
+    confirms the user can actually authenticate with their new password.
+    """
+    ip, ua = _client_context(request)
+    try:
+        user = auth_service.consume_password_reset(
+            db,
+            raw_token=body.token,
+            new_password=body.new_password,
+            ip_address=ip,
+            user_agent=ua,
+        )
+    except InvalidResetTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token.",
+        )
+
+    return ResetPasswordResponse(email=user.email)

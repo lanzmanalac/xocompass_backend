@@ -27,6 +27,7 @@ from api.schemas import (
     AdminUserListResponse,
     UpdateUserRequest,
     UserStatusResponse,
+    AdminInitiateResetResponse,
 )
 from domain.auth_models import User, UserRole
 from repository import auth_repository as repo
@@ -216,3 +217,91 @@ def deactivate_user(
         raise HTTPException(status_code=409, detail=str(exc))
 
     return UserStatusResponse(id=user.id, email=user.email, is_active=user.is_active)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Admin: Password Reset and Soft-Delete
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@router.post(
+    "/{user_id}/reset-password",
+    response_model=AdminInitiateResetResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Admin-initiated password reset. Returns a one-time reset URL.",
+)
+def admin_reset_password(
+    user_id: UUID,
+    request: Request,
+    db: DbDep,
+    admin: Annotated[User, Depends(require_admin)],
+):
+    """
+    Admin clicks 'Reset Password' on a user. Returns a fresh reset URL
+    with a 30-minute TTL. The admin shares this URL with the user out-of-band.
+    
+    Audit row: ADMIN_PASSWORD_RESET_INITIATED with the admin as actor.
+    The subsequent PASSWORD_RESET_COMPLETED row will attribute the user.
+    The two-row pair forms the complete forensic record.
+    """
+    target_user = repo.fetch_user_by_id(db, user_id)
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    ip = getattr(request.state, "client_ip", None)
+    ua = getattr(request.state, "user_agent", None)
+
+    try:
+        raw_token, expires_at = auth_service.admin_initiate_password_reset(
+            db,
+            actor=admin,
+            target_user=target_user,
+            ip_address=ip,
+            user_agent=ua,
+        )
+    except auth_service.InvalidResetTokenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    reset_url = f"{frontend_base}/reset-password#token={raw_token}"
+
+    return AdminInitiateResetResponse(
+        user_id=target_user.id,
+        email=target_user.email,
+        reset_url=reset_url,
+        expires_at=expires_at,
+    )
+
+
+@router.delete(
+    "/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Soft-delete a user (deactivate + anonymize email + revoke sessions).",
+)
+def delete_user(
+    user_id: UUID,
+    request: Request,
+    db: DbDep,
+    admin: Annotated[User, Depends(require_admin)],
+):
+    """
+    Soft-deletes a user. The User row is preserved (audit FK integrity);
+    the email is anonymized; all refresh tokens are revoked.
+    
+    Returns 204 on success — no body. The frontend should refresh the
+    user list and show a toast like "User deleted."
+    
+    Returns 404 if the user_id doesn't exist.
+    Returns 409 if the deletion would leave the system without an Admin
+    or if the actor is trying to delete themselves.
+    """
+    target = repo.fetch_user_by_id(db, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    try:
+        auth_service.admin_delete_user(
+            db, actor=admin, target_user=target, request=request,
+        )
+    except LastAdminError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return None  # 204 No Content

@@ -479,3 +479,23 @@ Unknown routes also use the shared error envelope:
 - Do not assume `/api/dashboard-stats/{model_id}` and `/api/forecast-graph/{model_id}` share the same chart granularity or field names.
 
 
+## Password Reset (Phase 7)
+
+### URL fragment delivery
+
+Password reset URLs use the URL **fragment** (`#token=...`) rather than a query parameter (`?token=...`). This is a deliberate security choice: fragments are never transmitted to any server, including analytics or third-party resources loaded by the reset page.
+
+The frontend MUST extract the token from `window.location.hash`, not `window.location.search`.
+
+```javascript
+const params = new URLSearchParams(window.location.hash.slice(1));
+const token = params.get('token');
+```
+
+After extracting the token, the frontend SHOULD clear the fragment from the URL via `window.history.replaceState(null, '', window.location.pathname)` to shorten the window during which the token is visible in the address bar.
+
+### Endpoints
+
+- `POST /auth/forgot-password` → `{ email }` → always 200 with generic message (no enumeration).
+- `POST /auth/reset-password` → `{ token, new_password }` → 200 on success, 400 on invalid token.
+- `POST /admin/users/{user_id}/reset-password` → returns the reset URL in the response body for the admin to share out-of-band.

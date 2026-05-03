@@ -342,6 +342,53 @@ class RefreshToken(Base):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 3.5 PASSWORD RESET TOKEN — hashed-at-rest, time-bound, single-use.
+# ═════════════════════════════════════════════════════════════════════════════
+
+class PasswordResetToken(Base):
+    """
+    A pending or consumed password-reset request.
+    
+    Lifecycle mirrors InviteToken: created → consumed | expired.
+    The `initiated_by_user_id` column distinguishes the two flows:
+      NULL          → self-service (user clicked "Forgot Password")
+      <admin_uuid>  → admin-initiated reset
+    
+    On consumption (POST /auth/reset-password):
+      1. Verify token hash matches an unconsumed, unexpired row
+      2. Update user.hashed_password
+      3. Set consumed_at = now()
+      4. Revoke ALL refresh tokens for the user (forces clean re-login)
+      5. Write PASSWORD_RESET_COMPLETED audit row
+    
+    All four operations happen in a single transaction. Any failure
+    rolls back the entire chain — preserves consistency between
+    password state, token state, and session state.
+    """
+
+    __tablename__ = "password_resets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    initiated_by_user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    created_at = Column(DateTime(timezone=True), default=get_ph_now, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    ip_address_initiated = Column(String(45), nullable=True)
+    ip_address_consumed = Column(String(45), nullable=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+    initiated_by = relationship("User", foreign_keys=[initiated_by_user_id])
+
+    def __repr__(self) -> str:
+        state = "consumed" if self.consumed_at else "pending"
+        flow = "self" if self.initiated_by_user_id is None else "admin"
+        return f"<PasswordResetToken id={self.id} user_id={self.user_id} {flow} {state}>"
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 4. AUDIT LOG — append-only ledger.
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -496,4 +543,5 @@ __all__ = [
     "RefreshToken",
     "AuditLog",
     "GlobalSetting",
+    "PasswordResetToken",
 ]

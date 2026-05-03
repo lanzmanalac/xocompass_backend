@@ -269,6 +269,38 @@ def decode_token(token: str, *, expected_type: str | None = None) -> dict[str, A
 # 32 bytes → ~43 chars after URL-safe base64 encoding. Plenty.
 INVITE_TOKEN_BYTES: Final[int] = 32
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PASSWORD RESET TOKENS — same threat model as invite tokens.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# We deliberately reuse the invite-token machinery: 32 bytes of
+# secrets.token_urlsafe entropy + SHA-256 fingerprint storage.
+# The *only* difference is TTL (30 minutes vs 72 hours) — short enough
+# that a stolen token is rarely useful, long enough to survive an email
+# round-trip + the user reading their inbox.
+# ═════════════════════════════════════════════════════════════════════════════
+
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: Final[int] = int(
+    os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", "30")
+)
+
+
+def generate_password_reset_token() -> tuple[str, str]:
+    """
+    Return (raw_token, token_hash). Same shape as generate_invite_token().
+    The plaintext exists in:
+      - The reset URL we email (or return in dev mode)
+      - The HTTP request body of POST /auth/reset-password
+    It NEVER touches stable storage.
+    """
+    raw = secrets.token_urlsafe(INVITE_TOKEN_BYTES)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return raw, digest
+
+
+def hash_password_reset_token(raw_token: str) -> str:
+    """SHA-256 hex digest for the indexed lookup at consumption time."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 def generate_invite_token() -> tuple[str, str]:
     """
@@ -315,3 +347,36 @@ logger.info(
     REFRESH_TOKEN_EXPIRE_DAYS,
     INVITE_TOKEN_EXPIRE_HOURS,
 )
+
+def build_password_reset_url(raw_token: str) -> str:
+    """
+    Builds the user-facing password reset URL.
+    
+    SECURITY: Uses the URL fragment (#) rather than a query parameter (?)
+    to deliver the token. Fragments are never transmitted to the server,
+    so the token does not appear in:
+      - Server access logs (the server only sees GET /reset-password)
+      - Referer headers sent to analytics, fonts, or other third-party
+        resources loaded by the reset page
+      - Proxy/CDN access logs
+    
+    The token still appears in browser history (a local-device concern
+    bounded by the 30-minute TTL and single-use enforcement upstream).
+    
+    ISO 25010 → Security → Confidentiality:
+      Mitigates the URL-leakage class of attacks without expanding the
+      threat model. Companion mitigations (TTL, single-use, session
+      revocation on consume) remain in force.
+    
+    ISO 25010 → Maintainability → Modularity:
+      Single source of truth for the reset URL shape. If we ever
+      change the path or fragment scheme, one edit covers all callers.
+    """
+    import os
+    base = (os.getenv("FRONTEND_BASE_URL") or "").rstrip("/")
+    if not base:
+        raise RuntimeError(
+            "FRONTEND_BASE_URL is not configured. "
+            "Password reset URLs cannot be constructed."
+        )
+    return f"{base}/reset-password#token={raw_token}"

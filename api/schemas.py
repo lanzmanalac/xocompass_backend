@@ -1,6 +1,34 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Optional, Literal
 from datetime import datetime, timedelta
+
+# ════════════════════════════════════════════════════════════════════════════
+# PASSWORD POLICY CONSTANTS — defined at module top so all schemas
+# (LoginRequest, RegisterRequest, ResetPasswordRequest) can reference them.
+#
+# ISO 25010 → Maintainability → Modifiability:
+#   Single source of truth. Tightening the policy is a one-line change here;
+#   every schema and validator picks it up automatically.
+# ════════════════════════════════════════════════════════════════════════════
+
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 256
+PASSWORD_ERROR_MESSAGE = (
+    f"Password must be at least {PASSWORD_MIN_LENGTH} characters long. "
+)
+
+
+def _validate_password_strength(v: str) -> str:
+    """Single source of truth for password validity. Reused by all schemas."""
+    if not isinstance(v, str):
+        raise ValueError(PASSWORD_ERROR_MESSAGE)
+    if len(v) < PASSWORD_MIN_LENGTH:
+        raise ValueError(PASSWORD_ERROR_MESSAGE)
+    if len(v) > PASSWORD_MAX_LENGTH:
+        raise ValueError(
+            f"Password is too long (maximum {PASSWORD_MAX_LENGTH} characters)."
+        )
+    return v
 
 # ════════════════════════════════════════════════════════════════════════════
 # SHARED UTILITY SCHEMAS
@@ -343,18 +371,13 @@ from uuid import UUID
 # ── Login ───────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    """
-    Plaintext credentials. Travels over TLS; never logged; never persisted.
-    Field-level constraints are deliberately permissive — we let the
-    auth_service make the actual reject/accept decision based on hash
-    verification, so that an invalid email shape and a wrong password
-    return the same opaque 401 (no enumeration).
-    """
     model_config = ConfigDict(extra="forbid")
-
     email: EmailStr
-    password: str = Field(min_length=1, max_length=256)
-
+    # NOTE: We DON'T validate password length on LOGIN — a user with an
+    # old short password (legacy bootstrap) must still be able to sign in.
+    # Length validation happens at REGISTRATION and RESET only.
+    password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
+    
 
 class AuthenticatedUser(BaseModel):
     """
@@ -420,23 +443,63 @@ class LogoutResponse(BaseModel):
 # ── Register (invite consumption) ───────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    """
-    Submitted when an invitee clicks the invite URL and sets their password.
-    The invite_token is the PLAINTEXT half of the (raw, hash) pair generated
-    by Phase 0's core.security.generate_invite_token; the server SHA-256s it
-    on arrival to find the matching invite_tokens row.
-    """
     model_config = ConfigDict(extra="forbid")
-
     invite_token: str = Field(min_length=20, max_length=128)
     full_name: str = Field(min_length=1, max_length=120)
-    password: str = Field(min_length=12, max_length=256)
+    password: str
 
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return _validate_password_strength(v)
 
 # RegisterResponse is identical in shape to LoginResponse — we auto-login
 # the new user immediately upon successful registration.
 RegisterResponse = LoginResponse
 
+class ForgotPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    """
+    Generic response. ALWAYS the same regardless of whether the email exists.
+    No enumeration leak.
+    """
+    status: Literal["ok"] = "ok"
+    message: str = (
+        "If an account exists for this email, a password reset link has been sent."
+    )
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=20, max_length=128)
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return _validate_password_strength(v)
+
+
+class ResetPasswordResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    email: EmailStr
+    message: str = "Password reset successful. Please log in with your new password."
+
+
+class AdminInitiateResetResponse(BaseModel):
+    """
+    Returned to the admin who initiated the reset. The reset_url is included
+    so the admin can hand-deliver it (Slack, in-person) when email is
+    unavailable. The plaintext token is gone after this response.
+    """
+    user_id: UUID
+    email: EmailStr
+    reset_url: str
+    expires_at: datetime
 
 # ── Me ──────────────────────────────────────────────────────────────────────
 

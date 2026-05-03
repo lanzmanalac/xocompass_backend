@@ -74,6 +74,12 @@ AuthActionLiteral = Literal[
     "TOKEN_REFRESHED",        # refresh token rotated successfully
     "TOKEN_REPLAY_DETECTED",  # consumed refresh token presented again
     "INVITE_CONSUMED",        # invite redeemed via /auth/register
+    # ── NEW: password reset vocabulary ─────────────────────────────────
+    "PASSWORD_RESET_REQUESTED",        # self-service forgot-password called
+    "ADMIN_PASSWORD_RESET_INITIATED",  # admin clicked reset on a user
+    "PASSWORD_RESET_COMPLETED",        # user successfully consumed a reset token
+    "PASSWORD_RESET_FAILED",           # invalid/expired/consumed token presented
+
 ]
 
 # ── user management domain ──────────────────────────────────────────────────
@@ -85,6 +91,7 @@ UserMgmtActionLiteral = Literal[
     "USER_RENAMED",       # admin patched full_name (Phase 4)
     "INVITE_ISSUED",      # admin called POST /admin/invitations (Phase 4)
     "INVITE_REVOKED",     # admin DELETED a pending invite (Phase 4)
+    "USER_DELETED",
 ]
 
 # ── data / forecast domain ──────────────────────────────────────────────────
@@ -175,6 +182,15 @@ DEFAULT_MODULE: Final[dict[str, str]] = {
     "SETTINGS_UPDATED": "settings",
     # export
     "EXPORT_GENERATED": "export",
+
+    "PASSWORD_RESET_REQUESTED": "auth",
+    "ADMIN_PASSWORD_RESET_INITIATED": "user_management",
+    "PASSWORD_RESET_COMPLETED": "auth",
+    "PASSWORD_RESET_FAILED": "auth",
+
+    "USER_DELETED": "user_management",
+
+
 }
 
 # Defensive sanity check at module import: every action has a default module.

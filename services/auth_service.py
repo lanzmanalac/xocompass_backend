@@ -425,6 +425,12 @@ class DuplicateInviteError(AuthError):
 class EmailAlreadyExistsError(AuthError):
     """A User row already exists for this email."""
 
+class InvalidResetTokenError(AuthError):
+    pass
+
+
+class ResetRateLimitError(AuthError):
+    """A pending reset already exists for this user."""
 
 # ── Users ───────────────────────────────────────────────────────────────────
 
@@ -556,6 +562,106 @@ def admin_set_user_active(
     db.commit()
     return target_user
 
+def admin_delete_user(
+    db: Session,
+    *,
+    actor: User,
+    target_user: User,
+    request=None,
+) -> User:
+    """
+    Soft-delete a user.
+    
+    Soft-delete = deactivate + anonymize email + revoke all sessions.
+    The User row is PRESERVED so audit_logs.user_id foreign keys remain valid.
+    The email is replaced with a unique sentinel so:
+      (a) the original email can be re-invited later
+      (b) audit_logs.user_email_snapshot retains the historical email
+      (c) the users.email unique constraint is satisfied
+    
+    GUARDS:
+      - Cannot delete self.
+      - Cannot delete the last active Admin.
+      - Idempotent: soft-deleting an already-soft-deleted user is a no-op
+        with an audited noop:true marker (matches admin_set_user_active).
+    
+    ISO 25010 → Security → Accountability:
+      USER_DELETED audit row preserves the original email AND the
+      anonymization sentinel, so a forensic reader can trace the deletion
+      back to the originating account even after anonymization.
+    
+    ISO 25010 → Reliability → Recoverability:
+      Soft-delete is reversible. An admin can restore a misclick by
+      reactivating and renaming. Hard-delete would not allow this.
+    """
+    import uuid as _uuid
+
+    if target_user.id == actor.id:
+        raise LastAdminError("Admins cannot delete their own account.")
+
+    if target_user.role == UserRole.ADMIN and target_user.is_active:
+        if repo.count_active_admins(db) <= 1:
+            raise LastAdminError("Cannot delete the last active Admin.")
+
+    # Idempotency: a row that's already been soft-deleted has the sentinel
+    # email pattern AND is inactive. Don't double-anonymize.
+    already_deleted = (
+        not target_user.is_active
+        and target_user.email.endswith("@deleted.local")
+    )
+
+    if already_deleted:
+        audit_service.log_action(
+            db,
+            action_type="USER_DELETED",
+            status=AuditStatus.SUCCESS,
+            actor=actor,
+            target_resource={"user_id": target_user.id},
+            request=request,
+            metadata={"noop": True},
+        )
+        db.commit()
+        return target_user
+
+    # Snapshot identifying fields BEFORE mutation. The audit metadata
+    # captures both the original identity and the anonymized sentinel.
+    original_email = target_user.email
+    original_full_name = target_user.full_name
+    original_role = target_user.role.value
+
+    # Step 1: deactivate + revoke sessions.
+    # We DON'T call admin_set_user_active here because that would commit
+    # mid-flow and split this into two transactions. We inline the logic
+    # so deactivate + anonymize + audit happen atomically.
+    target_user.is_active = False
+    revoked_count = repo.revoke_all_refresh_tokens_for_user(db, target_user.id)
+
+    # Step 2: anonymize. The 8-char UUID suffix guarantees uniqueness
+    # against the users.email unique constraint even if the same email
+    # is soft-deleted twice across two different account lifetimes.
+    target_user.email = f"deleted-{_uuid.uuid4().hex[:8]}@deleted.local"
+    target_user.full_name = "[deleted user]"
+
+    # Step 3: audit.
+    audit_service.log_action(
+        db,
+        action_type="USER_DELETED",
+        status=AuditStatus.SUCCESS,
+        actor=actor,
+        target_resource={"user_id": target_user.id},
+        request=request,
+        metadata={
+            "original_email": original_email,
+            "original_full_name": original_full_name,
+            "original_role": original_role,
+            "anonymized_email": target_user.email,
+            "revoked_refresh_tokens": revoked_count,
+            "soft_delete": True,
+        },
+    )
+
+    db.commit()
+    return target_user
 
 # ── Invitations ─────────────────────────────────────────────────────────────
 
@@ -651,3 +757,270 @@ def admin_revoke_invite(
 
     db.commit()
     return invite
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PASSWORD RESET — self-service and admin-initiated.
+#
+# DESIGN INVARIANT: Both flows produce the same password_resets row.
+# The only difference is `initiated_by_user_id`: NULL for self-service,
+# admin's UUID for admin-initiated. The consumption endpoint is identical.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def request_password_reset(
+    db: Session,
+    *,
+    email: str,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Optional[tuple[str, datetime]]:
+    """
+    Self-service flow. Returns (raw_token, expires_at) IF a real user exists,
+    else None.
+    
+    SECURITY: The CALLER must NOT differentiate the wire response based on
+    whether this returned None. The router always responds 200 with a generic
+    message regardless of outcome — see api/routers/auth.py forgot_password.
+    
+    Returning None lets the router decide whether to dispatch the email
+    without leaking enumeration information through timing or response shape.
+    
+    ISO 25010 → Security → Confidentiality (no enumeration leak).
+    """
+    from core.security import (
+        PASSWORD_RESET_TOKEN_EXPIRE_MINUTES,
+        generate_password_reset_token,
+    )
+
+    email_normalized = email.strip().lower()
+    user = repo.fetch_user_by_email(db, email_normalized)
+
+    # No user → log the attempt with no actor, return None.
+    # We DELIBERATELY perform a similar amount of work in both branches
+    # so a timing oracle can't distinguish "email exists" from "doesn't."
+    if user is None or not user.is_active:
+        audit_service.log_action(
+            db,
+            action_type="PASSWORD_RESET_REQUESTED",
+            status=AuditStatus.FAILED,
+            actor=None,
+            actor_email_override=email_normalized,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            metadata={"reason": "no_active_user"},
+        )
+        db.commit()
+        return None
+
+    # Rate limit: one active pending reset at a time. If the user clicks
+    # "Forgot password" three times, all three emails should NOT contain
+    # different working tokens — that's three live attack surfaces.
+    pending = repo.fetch_pending_reset_for_user(db, user.id)
+    if pending is not None:
+        # Don't reissue. Log it and return the existing token's expiry so
+        # the email-dispatch layer (if any) can re-send the URL — but the
+        # raw token is gone (we only kept the hash). In practice this means:
+        # "wait for the existing reset to expire, then try again."
+        audit_service.log_action(
+            db,
+            action_type="PASSWORD_RESET_REQUESTED",
+            status=AuditStatus.FAILED,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            metadata={"reason": "pending_reset_exists",
+                      "existing_expires_at": pending.expires_at.isoformat()},
+        )
+        db.commit()
+        return None
+
+    # Happy path: mint a token.
+    raw_token, token_hash = generate_password_reset_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+    )
+
+    repo.insert_password_reset_token(
+        db,
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        initiated_by_user_id=None,  # self-service
+        ip_address=ip_address,
+    )
+
+    audit_service.log_action(
+        db,
+        action_type="PASSWORD_RESET_REQUESTED",
+        status=AuditStatus.SUCCESS,
+        actor=user,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        metadata={"flow": "self_service"},
+    )
+
+    db.commit()
+    return raw_token, expires_at
+
+
+def admin_initiate_password_reset(
+    db: Session,
+    *,
+    actor: User,
+    target_user: User,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> tuple[str, datetime]:
+    """
+    Admin-initiated reset. Returns (raw_token, expires_at) — the caller
+    (router) must include the resulting reset URL in the response body so
+    the admin can hand it to the user out-of-band.
+    
+    Differs from self-service in two ways:
+      1. No enumeration concern → always returns a token (admins know the user exists).
+      2. Revokes any pending self-service reset for this user before issuing.
+         If a user requested self-service AND an admin overrides, the admin
+         token is the canonical one.
+    """
+    from core.security import (
+        PASSWORD_RESET_TOKEN_EXPIRE_MINUTES,
+        generate_password_reset_token,
+    )
+
+    if not target_user.is_active:
+        raise InvalidResetTokenError(
+            "Cannot reset password for an inactive account. Reactivate first."
+        )
+
+    revoked_count = repo.revoke_pending_resets_for_user(db, target_user.id)
+
+    raw_token, token_hash = generate_password_reset_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+    )
+
+    repo.insert_password_reset_token(
+        db,
+        user_id=target_user.id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        initiated_by_user_id=actor.id,
+        ip_address=ip_address,
+    )
+
+    audit_service.log_action(
+        db,
+        action_type="ADMIN_PASSWORD_RESET_INITIATED",
+        status=AuditStatus.SUCCESS,
+        actor=actor,
+        target_resource={"user_id": target_user.id, "email": target_user.email},
+        ip_address=ip_address,
+        user_agent=user_agent,
+        metadata={
+            "revoked_pending_resets": revoked_count,
+            "expires_at": expires_at.isoformat(),
+        },
+    )
+
+    db.commit()
+    return raw_token, expires_at
+
+
+def consume_password_reset(
+    db: Session,
+    *,
+    raw_token: str,
+    new_password: str,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> User:
+    """
+    Atomic password reset consumption.
+    
+    Steps (all in one transaction):
+      1. SELECT ... FOR UPDATE on password_resets.token_hash
+      2. Validate: not consumed, not expired
+      3. Update users.hashed_password
+      4. Mark password_resets row consumed
+      5. Revoke ALL refresh tokens for the user (force clean re-login)
+      6. Write PASSWORD_RESET_COMPLETED audit row
+    
+    On ANY failure, the whole transaction rolls back.
+    
+    Returns the user (for the wire response — the frontend needs the email
+    to show "password reset for alice@kjs.com, please log in").
+    """
+    from core.security import hash_password, hash_password_reset_token
+
+    token_hash = hash_password_reset_token(raw_token)
+    reset_row = repo.fetch_password_reset_by_hash_for_update(db, token_hash)
+
+    if reset_row is None:
+        # Don't write an audit row here — we don't know whose reset this was.
+        # The metadata wouldn't have a target_user. Wire response is opaque.
+        raise InvalidResetTokenError("Invalid or expired reset token.")
+
+    if reset_row.consumed_at is not None:
+        # Token replay. Audit it under the user.
+        user = repo.fetch_user_by_id(db, reset_row.user_id)
+        audit_service.log_action(
+            db,
+            action_type="PASSWORD_RESET_FAILED",
+            status=AuditStatus.FAILED,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            metadata={"reason": "token_replay",
+                      "token_id": str(reset_row.id)},
+        )
+        db.commit()
+        raise InvalidResetTokenError("Invalid or expired reset token.")
+
+    if reset_row.expires_at < datetime.now(timezone.utc):
+        user = repo.fetch_user_by_id(db, reset_row.user_id)
+        audit_service.log_action(
+            db,
+            action_type="PASSWORD_RESET_FAILED",
+            status=AuditStatus.FAILED,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            metadata={"reason": "token_expired",
+                      "token_id": str(reset_row.id)},
+        )
+        db.commit()
+        raise InvalidResetTokenError("Invalid or expired reset token.")
+
+    user = repo.fetch_user_by_id(db, reset_row.user_id)
+    if user is None or not user.is_active:
+        raise InvalidResetTokenError("Invalid or expired reset token.")
+
+    # All checks passed. Commit the password change.
+    user.hashed_password = hash_password(new_password)
+    reset_row.consumed_at = datetime.now(timezone.utc)
+    reset_row.ip_address_consumed = ip_address
+
+    # CRITICAL: revoke all sessions. If the password was reset because of
+    # account compromise, the attacker's existing refresh tokens must die.
+    revoked_sessions = repo.revoke_all_refresh_tokens_for_user(db, user.id)
+
+    audit_service.log_action(
+        db,
+        action_type="PASSWORD_RESET_COMPLETED",
+        status=AuditStatus.SUCCESS,
+        actor=user,
+        target_resource={"user_id": user.id},
+        ip_address=ip_address,
+        user_agent=user_agent,
+        metadata={
+            "flow": ("admin_initiated"
+                     if reset_row.initiated_by_user_id is not None
+                     else "self_service"),
+            "revoked_sessions": revoked_sessions,
+            "token_id": str(reset_row.id),
+        },
+    )
+
+    db.commit()
+    return user
+

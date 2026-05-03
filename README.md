@@ -12,6 +12,7 @@ environment variables in addition to `DATABASE_URL` and `CORS_ALLOWED_ORIGINS`:
 | `INVITE_TOKEN_EXPIRE_HOURS` | no | `72` | Lifetime of a pending invitation link. |
 | `FRONTEND_BASE_URL` | **yes** | — (admin invites fail) | Used to build the invite URL returned to admins. |
 | `ENVIRONMENT` | no | `development` | One of `development`, `staging`, `production`. Gates debug routes. |
+| `LOG_PASSWORD_RESET_URLS_INSECURE` | no | `false` | **Local dev only.** When `true`, password reset URLs are logged to stdout. NEVER set in staging or production — it makes the URL visible to anyone with log access. The variable name is intentionally explicit. |
 
 **Generating a JWT secret:**
 
@@ -32,3 +33,4 @@ gcloud run services update xocompass-backend \
   --region=asia-southeast1 \
   --update-secrets=JWT_SECRET_KEY=xocompass-jwt-secret:latest
 ```
+
