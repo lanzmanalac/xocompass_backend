@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 
 from uuid import UUID
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # PASSWORD POLICY CONSTANTS — defined at module top so all schemas
 # (LoginRequest, RegisterRequest, ResetPasswordRequest) can reference them.
@@ -176,13 +175,51 @@ class ChartPoint(BaseModel):
     lowerCI: float
     upperCI: float
 
+def classify_risk(ci_gap: float) -> str:
+    """
+    Rule-based risk tier derived from CI gap.
+
+    Boundaries are cast to float() explicitly to guard against type coercion
+    issues when ci_gap originates from a numpy or SQLAlchemy Numeric column.
+
+    Thresholds:
+        Low      : ci_gap <= 4.0
+        Medium   : 4.0 < ci_gap <= 5.5
+        High     : 5.5 < ci_gap <= 6.5
+        Critical : ci_gap > 6.5
+    """
+    ci_gap = float(ci_gap)          # defensive cast — see ISO note above
+
+    if ci_gap <= float(4.0):
+        return "Low"
+    elif ci_gap <= float(5.5):
+        return "Medium"
+    elif ci_gap <= float(6.5):
+        return "High"
+    else:
+        return "Critical"
+
 class ForecastGraphPoint(BaseModel):
     date: datetime
     actual: Optional[float] = None
     predicted: Optional[float] = None
     lower_bound: Optional[float] = None
     upper_bound: Optional[float] = None
-    confidence_tier: Optional[str] = None   # ← must be here
+    confidence_tier: Optional[str] = None  # <-- DO NOT FORGET THIS!
+
+    # ── NEW COMPUTED FIELDS ───────────────────
+    ci_ratio: Optional[float] = Field(
+        default=None,
+        description="Half-width of the Confidence Interval: (upper_bound - lower_bound) / 2"
+    )
+    ci_gap: Optional[float] = Field(
+        default=None,
+        description="Relative uncertainty: ci_ratio - predicted"
+    )
+    risk_factor: Optional[str] = Field(
+        default=None,
+        description="Rule-based tier: Low | Medium | High | Critical"
+    )
 
 class ForecastGraphResponse(BaseModel):
     data: List[ForecastGraphPoint]
@@ -284,17 +321,6 @@ class ModelRenameRequest(BaseModel):
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 2: FORECAST & ACTIONS
 # ════════════════════════════════════════════════════════════════════════════
-
-class ForecastGraphPoint(BaseModel):
-    date: datetime
-    actual: Optional[float] = None          # real booking count (TrainingDataLog)
-    predicted: Optional[float] = None       # forward forecast OR backtest fitted value
-    lower_bound: Optional[float] = None
-    upper_bound: Optional[float] = None
-    confidence_tier: Optional[str] = None   # "BACKTEST" | "HIGH" | "LOWER" | None
-
-class ForecastGraphResponse(BaseModel):
-    data: List[ForecastGraphPoint]
 
 class CriticalForecastWeek(BaseModel):
     week_start: datetime

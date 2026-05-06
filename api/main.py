@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.openapi.utils import get_openapi
 from pandas.errors import EmptyDataError, ParserError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -54,6 +55,7 @@ from api.schemas import (
     ValidationPoint,
     DataQualityReport,
     RouteCount, RevenueByYear,
+    classify_risk,
     RevenueByMonth,
 
 )
@@ -206,6 +208,33 @@ def _normalize_correlation_points(points: list[object] | None) -> list[Correlati
 
 
 app = FastAPI(title="XoCompass API", version="10.1")
+
+app = FastAPI(title="XoCompass API", version="10.1")
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title="XoCompass API",
+        version="10.1",
+        routes=app.routes,
+    )
+    # Add HTTP Bearer scheme alongside the existing OAuth2
+    schema["components"]["securitySchemes"]["BearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+    }
+    # Apply it globally
+    for path in schema.get("paths", {}).values():
+        for operation in path.values():
+            operation.setdefault("security", []).append({"BearerAuth": []})
+    
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
 
 # ── PHASE 6: RATE LIMITER ──
 # `app.state.limiter` is how slowapi retrieves the Limiter instance
@@ -1095,17 +1124,30 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db), _user: Auth
                 logger.debug("Could not parse validation_graph label '%s': %s",
                              item.get("date_label"), e)
 
-    # ── Forward forecast rows only from ForecastCache ─────────────────────
+# ── Forward forecast rows only from ForecastCache ─────────────────────
     forward_predictions = [p for p in predictions if (p.periods_ahead or 0) > 0]
-
     actual_dates = {r.record_date.date() for r in actuals}
-
     points = []
 
     # ── Historical actuals — merge validation predictions where available ──
     for r in actuals:
         date_key = r.record_date.date()
         vg = validation_lookup.get(date_key)
+
+        # Initialize our new fields to None
+        calc_ci_ratio = None
+        calc_ci_gap = None
+        calc_risk = None
+
+        # If validation graph data exists, calculate the Risk metrics for historical data!
+        # FIX: Changed "predicted" to "forecasted" to match your DB schema
+        if vg and vg.get("forecasted") is not None and vg.get("lower_ci") is not None and vg.get("upper_ci") is not None:
+            v_pred  = float(vg["forecasted"])
+            v_lower = float(vg["lower_ci"])
+            v_upper = float(vg["upper_ci"])
+            calc_ci_ratio = (v_upper - v_lower) / 2.0
+            calc_ci_gap   = calc_ci_ratio - v_pred
+            calc_risk     = classify_risk(calc_ci_gap)
 
         points.append(ForecastGraphPoint(
             date=r.record_date,
@@ -1114,16 +1156,29 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db), _user: Auth
             lower_bound=round(float(vg["lower_ci"]), 2) if vg else None,
             upper_bound=round(float(vg["upper_ci"]), 2) if vg else None,
             confidence_tier="BACKTEST" if vg else None,
+            ci_ratio=round(calc_ci_ratio, 4) if calc_ci_ratio is not None else None,
+            ci_gap=round(calc_ci_gap, 4)     if calc_ci_gap is not None else None,
+            risk_factor=calc_risk,
         ))
 
     # ── Forward forecast rows ─────────────────────────────────────────────
     for p in forward_predictions:
         if p.forecast_date.date() in actual_dates:
-            logger.debug(
-                "Skipping forward forecast point %s — date already in actuals.",
-                p.forecast_date.date()
-            )
             continue
+
+        # Compute CI metrics and Risk Factor for Future predictions
+        if p.predicted is not None and p.lower_bound is not None and p.upper_bound is not None:
+            predicted_f  = float(p.predicted)
+            lower_f      = float(p.lower_bound)
+            upper_f      = float(p.upper_bound)
+            ci_ratio     = (upper_f - lower_f) / 2.0
+            ci_gap       = ci_ratio - predicted_f
+            risk         = classify_risk(ci_gap)
+        else:
+            ci_ratio  = None
+            ci_gap    = None
+            risk      = None
+
         points.append(ForecastGraphPoint(
             date=p.forecast_date,
             actual=None,
@@ -1131,11 +1186,14 @@ def get_forecast_graph(model_id: int, db: Session = Depends(get_db), _user: Auth
             lower_bound=p.lower_bound,
             upper_bound=p.upper_bound,
             confidence_tier=p.confidence_tier,
+            ci_ratio=round(ci_ratio, 4) if ci_ratio is not None else None,
+            ci_gap=round(ci_gap, 4)     if ci_gap is not None else None,
+            risk_factor=risk,
         ))
 
     return ForecastGraphResponse(data=points)
-    
 
+    
 @app.get("/api/strategic-actions/{model_id}", 
          response_model=StrategicActionsResponse)
 def get_strategic_actions(model_id: int, db: Session = Depends(get_db), _user: AuthUser = Depends(require_any),):
