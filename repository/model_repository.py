@@ -32,25 +32,25 @@ from domain.auth_models import (  # noqa: F401
 
 
 load_dotenv()
-# URL from .env (Neon DB)
+# URL from .env (Google Cloud DB)
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./xocompass.db")
 
-# Connect to Neon DB
+# Connect to Google Cloud DB
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL, 
         connect_args={"check_same_thread": False}
     )
 else:
-    # the path for the Neon Database
+    # the path for the Google Cloud Database
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL,
-        pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=2,
-        pool_recycle=300,
+        pool_pre_ping=True,  # Good: Checks if connection is alive before using it
+        pool_size=2,         # REDUCED: Prevents Cloud Run from hoarding connections
+        max_overflow=2,      # LIMIT: Allows max 4 total connections per container
+        pool_timeout=30,     # NEW: Fails fast (30s) instead of hanging forever
+        pool_recycle=1800,   # ADJUSTED: Refreshes connections every 30 mins
     )
-
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # 3. REPOSITORY FUNCTIONS
