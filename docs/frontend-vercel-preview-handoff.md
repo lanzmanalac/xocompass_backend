@@ -2,7 +2,7 @@
 
 The XoCompass backend Preview uses Neon for staff accounts. Its `/health` returned `ok`, and the test Admin received HTTP `200` from `/auth/login`. In this frontend Preview, wire **Train on this PC** and **Publish** together. The analyst reviews the local report before choosing when to publish it.
 
-**Login-only backend already tested** [xocompass-viewer-preview `/health`](https://xocompass-viewer-preview-o5xmns0me-lanzmanalacs-projects.vercel.app/health). Use the updated backend URL from the backend owner when testing Publish.
+**Current backend Preview** [xocompass-viewer-preview `/health`](https://xocompass-viewer-preview-4p0kb8mfn-lanzmanalacs-projects.vercel.app/health). An anonymous request returned HTTP `200`, and the Publish route returned `401` without an XoCompass session. Use the rewrite below to test login. End-to-end Publish awaits the frontend Preview receiver and its private Blob store.
 
 **Test account** `xocompass-test@example.com`. Get the password privately from the backend owner.
 
@@ -33,12 +33,12 @@ The XoCompass backend Preview uses Neon for staff accounts. Its `/health` return
 
 ### 1. Update `vercel.json` on a Preview branch
 
-Create a branch such as `codex/vercel-login-preview` from a clean checkout. In the frontend repo's `vercel.json`, replace the existing `/backend/:path*` rewrite with this entry. The example uses the backend URL already tested for login. Replace the hostname with the updated URL from the backend owner for the combined test. Keep the rewrite above the SPA fallback and preserve its API exclusions. [Vercel rewrites](https://vercel.com/docs/routing/rewrites)
+Create a branch such as `codex/vercel-login-preview` from a clean checkout. In the frontend repo's `vercel.json`, replace the existing `/backend/:path*` rewrite with this entry. The example uses the reachable backend Preview URL. If the backend owner redeploys after setting the Publish variables, use the new URL after its health check passes. Keep the rewrite above the SPA fallback and preserve its API exclusions. [Vercel rewrites](https://vercel.com/docs/routing/rewrites)
 
 ```json
 {
   "source": "/backend/:path*",
-  "destination": "https://xocompass-viewer-preview-o5xmns0me-lanzmanalacs-projects.vercel.app/:path*"
+  "destination": "https://xocompass-viewer-preview-4p0kb8mfn-lanzmanalacs-projects.vercel.app/:path*"
 }
 ```
 
