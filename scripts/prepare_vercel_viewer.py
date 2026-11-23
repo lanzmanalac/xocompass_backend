@@ -15,11 +15,11 @@ VIEWER_SOURCES = (
     "domain/models.py",
     "repository/auth_repository.py",
     "repository/model_repository.py",
+    "repository/published_forecast_repository.py",
     "services/audit_service.py",
     "services/audit_vocab.py",
     "services/auth_service.py",
     "services/forecast_publication_views.py",
-    "services/publication_delivery.py",
     "services/published_forecast_service.py",
 )
 VIEWER_DEPENDENCIES = (
@@ -34,7 +34,6 @@ VIEWER_DEPENDENCIES = (
     "python-jose[cryptography]",
     "passlib[argon2]",
     "argon2-cffi",
-    "requests",
     "slowapi",
     "tzdata",
 )

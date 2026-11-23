@@ -18,15 +18,11 @@ from starlette.exceptions import HTTPException
 from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, Response
 
-from api.dependencies.auth import require_analyst, require_any
+from api.dependencies.auth import DbDep, require_analyst, require_any
 from api.routers.auth import session_router
 from api.schemas import ErrorDetail, ErrorResponse, PublicationSnapshot, PublishedForecastResponse
 from core.rate_limit import limiter
-from services.publication_delivery import (
-    PublicationDeliveryError,
-    PublicationTarget,
-    deliver_snapshot,
-)
+from repository.published_forecast_repository import PublicationConflictError, store_current_report
 from services.published_forecast_service import (
     ForecastUnavailableError,
     NoPublishedForecastError,
@@ -106,17 +102,13 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/viewer/published-forecast", dependencies=[Depends(require_any)])
-def get_published_forecast() -> PublishedForecastResponse:
-    return read_published_forecast()
+def get_published_forecast(db: DbDep) -> PublishedForecastResponse:
+    return read_published_forecast(db)
 
 
 @app.post("/api/viewer/publish", dependencies=[Depends(require_analyst)])
-async def publish_browser_forecast(request: Request) -> JSONResponse:
-    """Forward a validated aggregate snapshot to the private receiver."""
-    target = PublicationTarget.for_hosted_browser()
-    if target is None:
-        return error_response(503, "publish_unavailable", "Browser publishing is unavailable.")
-
+async def publish_browser_forecast(request: Request, db: DbDep) -> JSONResponse:
+    """Save a validated aggregate snapshot in the hosted PostgreSQL database."""
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media_type != "application/json":
         return error_response(415, "expected_json", "Send the dashboard snapshot as JSON.")
@@ -139,7 +131,7 @@ async def publish_browser_forecast(request: Request) -> JSONResponse:
         ):
             return error_response(400, "invalid_snapshot", invalid_snapshot)
         run_created_at = snapshot.run_created_at.astimezone(timezone.utc)
-        # The receiver orders publications by this timestamp. A clock set well
+        # The report store orders publications by this timestamp. A clock set well
         # ahead of UTC could otherwise lock out later runs.
         if run_created_at > datetime.now(timezone.utc) + PUBLISH_CLOCK_SKEW:
             return error_response(
@@ -147,7 +139,6 @@ async def publish_browser_forecast(request: Request) -> JSONResponse:
             )
         canonical = snapshot.model_dump(mode="json", exclude_unset=True)
         canonical["schema_version"] = snapshot.schema_version
-        run_id = str(snapshot.run_id)
         canonical["run_created_at"] = run_created_at.isoformat().replace("+00:00", "Z")
         payload = json.dumps(
             canonical, separators=(",", ":"), sort_keys=True, allow_nan=False, ensure_ascii=False,
@@ -158,11 +149,15 @@ async def publish_browser_forecast(request: Request) -> JSONResponse:
         return error_response(413, "snapshot_too_large", too_large)
 
     try:
-        published_at = await run_in_threadpool(deliver_snapshot, target, payload, run_id)
-    except PublicationDeliveryError as exc:
-        code = "publish_conflict" if exc.status_code == 409 else "publish_failed"
-        return error_response(exc.status_code, code, str(exc))
+        published_at = await run_in_threadpool(
+            store_current_report, db, snapshot.run_id, run_created_at, canonical,
+        )
+    except PublicationConflictError:
+        return error_response(409, "publish_conflict", "A newer or conflicting forecast is already online.")
+    except SQLAlchemyError as exc:
+        logger.warning("Forecast publication database operation failed (%s).", type(exc).__name__)
+        return error_response(503, "publish_failed", "Could not publish the report. Retry with the same saved results.")
     return JSONResponse({
-        "run_id": run_id,
+        "run_id": str(snapshot.run_id),
         "published_at": published_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
     })

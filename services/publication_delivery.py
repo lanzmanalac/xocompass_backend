@@ -22,19 +22,7 @@ class PublicationTarget:
         )
 
     @classmethod
-    def for_hosted_browser(cls) -> "PublicationTarget | None":
-        token = os.getenv("XOCOMPASS_BROWSER_PUBLISH_TOKEN", "").strip()
-        read_token = os.getenv("XOCOMPASS_PUBLISH_READ_TOKEN", "").strip()
-        if not read_token or token == read_token:
-            return None
-        return cls._configured(
-            os.getenv("XOCOMPASS_PUBLISHED_FORECAST_URL", "").strip(),
-            token,
-            path="/api/published-forecast",
-        )
-
-    @classmethod
-    def _configured(cls, url: str, token: str, *, path: str | None = None) -> "PublicationTarget | None":
+    def _configured(cls, url: str, token: str) -> "PublicationTarget | None":
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -43,7 +31,6 @@ class PublicationTarget:
             not token or parsed.scheme != "https" or not parsed.hostname
             or parsed.username is not None or parsed.password is not None
             or parsed.query or parsed.fragment
-            or (path is not None and parsed.path != path)
         ):
             return None
         canonical_url = parsed._replace(
