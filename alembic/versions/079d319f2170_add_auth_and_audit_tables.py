@@ -36,8 +36,9 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
+    _audit_id_type = sa.Integer() if op.get_bind().dialect.name == 'sqlite' else sa.BigInteger()
     op.create_table('audit_logs',
-    sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+    sa.Column('id', _audit_id_type, autoincrement=True, nullable=False),
     sa.Column('timestamp', sa.DateTime(timezone=True), nullable=False),
     sa.Column('user_id', sa.UUID(), nullable=True),
     sa.Column('user_email_snapshot', sa.String(length=255), nullable=True),
@@ -45,7 +46,7 @@ def upgrade() -> None:
     sa.Column('module', sa.String(length=32), nullable=False),
     sa.Column('target_resource', sa.String(length=120), nullable=True),
     sa.Column('status', sa.Enum('SUCCESS', 'FAILED', name='audit_status'), nullable=False),
-    sa.Column('ip_address', postgresql.INET(), nullable=True),
+    sa.Column('ip_address', sa.String(45), nullable=True),
     sa.Column('user_agent', sa.String(length=500), nullable=True),
     sa.Column('extra_metadata', sa.JSON(), nullable=True),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),

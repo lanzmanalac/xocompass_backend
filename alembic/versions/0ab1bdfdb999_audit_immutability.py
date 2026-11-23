@@ -19,8 +19,27 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # We use CREATE OR REPLACE and DROP IF EXISTS so this runs cleanly
-    # even though we manually tested the SQL earlier!
+    if op.get_bind().dialect.name == 'sqlite':
+        op.execute("DROP TRIGGER IF EXISTS enforce_append_only_update")
+        op.execute("""
+            CREATE TRIGGER enforce_append_only_update
+            BEFORE UPDATE ON audit_logs
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_logs is append-only; UPDATE is not permitted');
+            END
+        """)
+        op.execute("DROP TRIGGER IF EXISTS enforce_append_only_delete")
+        op.execute("""
+            CREATE TRIGGER enforce_append_only_delete
+            BEFORE DELETE ON audit_logs
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'audit_logs is append-only; DELETE is not permitted');
+            END
+        """)
+        return
+
     op.execute("""
     CREATE OR REPLACE FUNCTION prevent_audit_update()
     RETURNS TRIGGER AS $$
@@ -49,6 +68,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == 'sqlite':
+        op.execute("DROP TRIGGER IF EXISTS enforce_append_only_update")
+        op.execute("DROP TRIGGER IF EXISTS enforce_append_only_delete")
+        return
+
     op.execute("""
     DROP TRIGGER IF EXISTS enforce_append_only_update ON audit_logs;
     DROP TRIGGER IF EXISTS enforce_append_only_delete ON audit_logs;

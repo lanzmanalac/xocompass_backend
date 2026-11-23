@@ -52,6 +52,9 @@ import re
 import sys
 from typing import NoReturn
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # IMPORTANT: do not import anything that triggers core.security at the top
 # level, so that a missing JWT_SECRET_KEY does not crash the script before
 # we have a chance to print a helpful diagnostic. We import lazily below.

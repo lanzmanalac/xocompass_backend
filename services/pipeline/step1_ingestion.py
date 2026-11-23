@@ -21,9 +21,11 @@ from core.config import (
     FORECAST_HORIZON,
     LEAD_SEARCH_MAX,
     LEAD_SEARCH_MIN,
-    SYSTEM_DATE,
     TYPHOON_HANGOVER,
     WEEKLY_RULE,
+    current_booking_week_start,
+    find_booking_date_column,
+    parse_manila_timestamps,
 )
 from core.exogenous import PHHolidayEngine, TyphoonInjector, weekly_intensity
 
@@ -41,11 +43,7 @@ def run_step1_data_ingestion(csv_path="KJS Data.csv"):
     df_raw = pd.read_csv(csv_path)
     print(f"\n📋 Raw data: {len(df_raw):,} transaction rows")
 
-    booking_col = None
-    for c in df_raw.columns:
-        n = c.strip().lower().replace(" ", "_")
-        if "generation" in n and "date" in n:
-            booking_col = c; break
+    booking_col = find_booking_date_column(df_raw.columns)
     if not booking_col:
         for c in df_raw.columns:
             if "travel" in c.lower() and "date" in c.lower():
@@ -59,11 +57,10 @@ def run_step1_data_ingestion(csv_path="KJS Data.csv"):
     assert booking_col, "❌ Could not detect a date column in the CSV."
     print(f"   Date column detected: '{booking_col}'")
 
-    df_raw["Booking_Date"] = pd.to_datetime(
-        df_raw[booking_col], dayfirst=False, errors="coerce"
-    )
-    df_raw = df_raw.dropna(subset=["Booking_Date"])
-    df_raw = df_raw[df_raw["Booking_Date"] <= SYSTEM_DATE]
+    df_raw["Booking_Date"] = parse_manila_timestamps(df_raw[booking_col]).dt.normalize()
+    df_raw = df_raw.loc[df_raw["Booking_Date"] < current_booking_week_start()]
+    if df_raw.empty:
+        raise ValueError("No valid booking dates in completed reporting weeks.")
     print(f"   Usable transactions:  {len(df_raw):,}")
 
     # ═══════════════════════════════════════════════════════════════════════

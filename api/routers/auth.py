@@ -65,6 +65,7 @@ from core.security import build_password_reset_url
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+session_router = APIRouter()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -120,7 +121,7 @@ def _to_refresh_response(t: TokenPair) -> RefreshResponse:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@router.post(
+@session_router.post(
     "/login",
     response_model=LoginResponse,
     status_code=status.HTTP_200_OK,
@@ -154,7 +155,7 @@ def login(
     return _to_login_response(result)
 
 
-@router.post(
+@session_router.post(
     "/refresh",
     response_model=RefreshResponse,
     status_code=status.HTTP_200_OK,
@@ -191,7 +192,7 @@ def refresh(
     return _to_refresh_response(tokens)
 
 
-@router.post(
+@session_router.post(
     "/logout",
     response_model=LogoutResponse,
     status_code=status.HTTP_200_OK,
@@ -259,7 +260,7 @@ def register(
     return _to_login_response(result)
 
 
-@router.get(
+@session_router.get(
     "/me",
     response_model=MeResponse,
     summary="Return the current authenticated user.",
@@ -391,3 +392,6 @@ def reset_password(
         )
 
     return ResetPasswordResponse(email=user.email)
+
+
+router.include_router(session_router)
