@@ -1,8 +1,10 @@
 # domain/models.py
 from datetime import datetime
+from uuid import UUID
 from zoneinfo import ZoneInfo
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, JSON
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy import CheckConstraint, Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, JSON, SmallInteger, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
@@ -170,3 +172,16 @@ class ForecastCache(Base):
 
     confidence_tier = Column(String(20), nullable=True)
     actual_bookings = Column(Float, nullable=True)  # populated for BACKTEST rows only
+
+
+class PublishedForecast(Base):
+    """The latest aggregate report available to signed-in staff."""
+
+    __tablename__ = "published_forecast"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_published_forecast_single_slot"),)
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
+    run_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    run_created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)

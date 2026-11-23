@@ -2,20 +2,19 @@ import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest import TestCase, skipUnless
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 from jose import jwt
-from requests import Response, Timeout
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 
 VIEWER_ID = UUID("a21aced1-57f6-430c-9787-26986335154b")
 RUN_ID = "897a62f3-0d80-4bc2-a48e-3d98afbaefcf"
-READ_TOKEN = "synthetic-blob-reader"
-PUBLICATION_URL = "https://example.test/api/published-forecast"
 UNCONNECTED_DATABASE = "postgresql://synthetic@localhost/xoco_synthetic"
 
 
@@ -64,14 +63,6 @@ def synthetic_publication():
     }
 
 
-def upstream_response(status, body):
-    response = Response()
-    response.status_code = status
-    response._content = json.dumps(body).encode()
-    response._content_consumed = True
-    return response
-
-
 def request(app, method, path, *, token=None, body=None):
     async def call():
         headers = []
@@ -118,9 +109,6 @@ class HostedViewerTests(TestCase):
         self.enterContext(patch.dict(os.environ, {
             "DATABASE_URL": UNCONNECTED_DATABASE,
             "JWT_SECRET_KEY": "only-used-for-synthetic-tests",
-            "XOCOMPASS_PUBLISHED_FORECAST_URL": PUBLICATION_URL,
-            "XOCOMPASS_PUBLISH_READ_TOKEN": READ_TOKEN,
-            "XOCOMPASS_VERCEL_AUTOMATION_TOKEN": "",
         }))
         from api.hosted import app
         from core.security import JWT_ALGORITHM, JWT_SECRET_KEY
@@ -143,12 +131,12 @@ class HostedViewerTests(TestCase):
         self.lookup = self.enterContext(patch(
             "api.dependencies.auth.auth_repo.fetch_user_by_id", return_value=self.active_user,
         ))
-        self.upstream = self.enterContext(patch("services.published_forecast_service.requests.get"))
+        self.store = self.enterContext(patch("services.published_forecast_service.fetch_current_report"))
 
-    def test_staff_access_is_rechecked_before_fetch_and_secrets_stay_server_side(self):
+    def test_staff_access_is_rechecked_before_reading_the_report(self):
         data = synthetic_publication()
         data["snapshot"]["raw_csv"] = "synthetic field that must be stripped"
-        self.upstream.return_value = upstream_response(200, data)
+        self.store.return_value = SimpleNamespace(**data)
 
         status, headers, body = request(self.app, "GET", self.endpoint, token=self.access)
 
@@ -157,14 +145,11 @@ class HostedViewerTests(TestCase):
         self.assertEqual(body["snapshot"]["run_id"], RUN_ID)
         self.assertEqual(body["snapshot"]["forecast_graph"]["data"][0]["predicted"], 16)
         self.assertNotIn("raw_csv", body["snapshot"])
-        self.assertEqual(self.upstream.call_args.args, (PUBLICATION_URL,))
-        self.assertEqual(self.upstream.call_args.kwargs["headers"]["Authorization"], f"Bearer {READ_TOKEN}")
-        self.assertFalse(self.upstream.call_args.kwargs["allow_redirects"])
 
         self.active_user.is_active = False
         status, _, _ = request(self.app, "GET", self.endpoint, token=self.access)
         self.assertEqual(status, 401)
-        self.upstream.assert_called_once()
+        self.store.assert_called_once()
 
     def test_unauthorized_never_reads_publication_and_expiry_uses_refresh_signal(self):
         for token in (None, "synthetic-invalid-token", self.refresh, self.expired):
@@ -174,36 +159,26 @@ class HostedViewerTests(TestCase):
                 self.assertIn(b"no-store", headers[b"cache-control"])
                 expected = "token_expired" if token == self.expired else "request_failed"
                 self.assertEqual(body["error"]["code"], expected)
-        self.upstream.assert_not_called()
+        self.store.assert_not_called()
         self.lookup.assert_not_called()
 
-    def test_known_empty_store_is_distinct_from_bad_upstream_response(self):
+    def test_empty_table_is_distinct_from_invalid_or_unavailable_data(self):
         cases = (
-            (upstream_response(404, {"error": "no_published_forecast"}), 404, "no_published_forecast"),
-            (upstream_response(404, {"error": "unknown"}), 503, "forecast_unavailable"),
-            (upstream_response(200, {"snapshot": None}), 503, "forecast_unavailable"),
-            (upstream_response(200, "a" * (3 * 1024 * 1024)), 503, "forecast_unavailable"),
-            (upstream_response(302, {}), 503, "forecast_unavailable"),
+            (None, 404, "no_published_forecast"),
+            (SimpleNamespace(snapshot=None, published_at=None), 503, "forecast_unavailable"),
         )
-        for response, expected_status, expected_code in cases:
-            with self.subTest(code=expected_code, upstream_status=response.status_code):
-                self.upstream.return_value = response
+        for report, expected_status, expected_code in cases:
+            with self.subTest(code=expected_code):
+                self.store.return_value = report
                 status, headers, body = request(self.app, "GET", self.endpoint, token=self.access)
                 self.assertEqual(status, expected_status)
                 self.assertEqual(body["error"]["code"], expected_code)
                 self.assertIn(b"no-store", headers[b"cache-control"])
 
-        self.upstream.side_effect = Timeout()
+        self.store.side_effect = SQLAlchemyError("synthetic private database details")
         status, _, body = request(self.app, "GET", self.endpoint, token=self.access)
-        self.assertEqual(status, 503)
-        self.assertEqual(body["error"]["code"], "forecast_unavailable")
-
-    def test_invalid_configuration_does_not_send_reader_credential(self):
-        with patch.dict(os.environ, {"XOCOMPASS_PUBLISHED_FORECAST_URL": "http://example.test/api/published-forecast"}):
-            status, _, body = request(self.app, "GET", self.endpoint, token=self.access)
-        self.assertEqual(status, 503)
-        self.assertEqual(body["error"]["code"], "forecast_unavailable")
-        self.upstream.assert_not_called()
+        self.assertEqual((status, body["error"]["code"]), (503, "forecast_unavailable"))
+        self.assertNotIn("synthetic private", json.dumps(body))
 
     def test_only_session_and_read_routes_are_available(self):
         for method, path in (
@@ -227,8 +202,6 @@ class HostedLoginPostgresTests(TestCase):
         self.enterContext(patch.dict(os.environ, {
             "DATABASE_URL": UNCONNECTED_DATABASE,
             "JWT_SECRET_KEY": "only-used-for-synthetic-tests",
-            "XOCOMPASS_PUBLISHED_FORECAST_URL": PUBLICATION_URL,
-            "XOCOMPASS_PUBLISH_READ_TOKEN": READ_TOKEN,
         }))
         from api.dependencies.auth import get_db
         from api.hosted import app
@@ -256,8 +229,8 @@ class HostedLoginPostgresTests(TestCase):
                 yield session
 
         self.enterContext(patch.dict(app.dependency_overrides, {get_db: synthetic_db}))
-        upstream = self.enterContext(patch("services.published_forecast_service.requests.get"))
-        upstream.return_value = upstream_response(200, synthetic_publication())
+        store = self.enterContext(patch("services.published_forecast_service.fetch_current_report"))
+        store.return_value = SimpleNamespace(**synthetic_publication())
         credentials = {"email": "synthetic-staff@example.com", "password": "Synthetic-staff-password-23"}
         with Session(engine) as session:
             session.add(User(
@@ -309,4 +282,86 @@ class HostedLoginPostgresTests(TestCase):
             session.commit()
         status, _, body = request(app, "GET", endpoint, token=rotated["access_token"])
         self.assertEqual((status, body["error"]["code"]), (401, "request_failed"))
-        self.assertEqual(upstream.call_count, 2)
+        self.assertEqual(store.call_count, 2)
+
+    def test_reports_survive_failed_publish_and_retry_uses_original_receipt(self):
+        self.enterContext(patch.dict(os.environ, {
+            "DATABASE_URL": UNCONNECTED_DATABASE,
+            "JWT_SECRET_KEY": "only-used-for-synthetic-tests",
+            "XOCOMPASS_PUBLISHED_FORECAST_URL": "",
+            "XOCOMPASS_PUBLISH_READ_TOKEN": "",
+            "XOCOMPASS_BROWSER_PUBLISH_TOKEN": "",
+        }))
+        from api.dependencies.auth import get_db
+        from api.hosted import app
+        from core.security import JWT_ALGORITHM, JWT_SECRET_KEY
+        from domain.auth_models import User, UserRole
+
+        url = os.environ["XOCOMPASS_TEST_POSTGRES_URL"]
+        admin_engine = create_engine(url)
+        self.addCleanup(admin_engine.dispose)
+        schema = f"synthetic_viewer_{uuid4().hex}"
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {schema}"))
+
+        def drop_schema():
+            with admin_engine.begin() as connection:
+                connection.execute(text(f"DROP SCHEMA {schema} CASCADE"))
+
+        self.addCleanup(drop_schema)
+        engine = create_engine(url, connect_args={"options": f"-c search_path={schema}"})
+        self.addCleanup(engine.dispose)
+        with engine.begin() as connection:
+            connection.execute(text("""
+                CREATE TABLE published_forecast (
+                    id smallint PRIMARY KEY CHECK (id = 1),
+                    run_id uuid NOT NULL,
+                    run_created_at timestamptz NOT NULL,
+                    published_at timestamptz NOT NULL,
+                    snapshot jsonb NOT NULL
+                )
+            """))
+
+        def synthetic_db():
+            with Session(engine) as session:
+                yield session
+
+        self.enterContext(patch.dict(app.dependency_overrides, {get_db: synthetic_db}))
+        user = User(id=VIEWER_ID, is_active=True, role=UserRole.ANALYST)
+        self.enterContext(patch("api.dependencies.auth.auth_repo.fetch_user_by_id", return_value=user))
+        token = jwt.encode({
+            "sub": str(VIEWER_ID), "typ": "access",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+        def publish(snapshot):
+            return request(app, "POST", "/api/viewer/publish", token=token, body=snapshot)
+
+        def read():
+            return request(app, "GET", HostedViewerTests.endpoint, token=token)
+
+        first = synthetic_publication()["snapshot"]
+        second = {**first, "run_id": str(uuid4()), "run_created_at": "2026-11-20T03:00:00Z"}
+        status, _, first_receipt = publish(first)
+        self.assertEqual(status, 200, first_receipt)
+
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE published_forecast ADD CONSTRAINT synthetic_failure CHECK (snapshot->>'run_id' = :run_id)"),
+                               {"run_id": first["run_id"]})
+        status, _, error = publish(second)
+        self.assertEqual((status, error["error"]["code"]), (503, "publish_failed"))
+
+        user.role = UserRole.VIEWER
+        status, _, body = read()
+        self.assertEqual((status, body["snapshot"]["run_id"]), (200, first["run_id"]))
+        self.assertEqual(publish(second)[0], 403)
+
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE published_forecast DROP CONSTRAINT synthetic_failure"))
+        user.role = UserRole.ANALYST
+        status, _, receipt = publish(second)
+        self.assertEqual(status, 200, receipt)
+        self.assertEqual(publish(second)[2], receipt)
+        self.assertEqual(publish(first)[0], 409)
+        self.assertEqual(publish({**second, "model_id": 1})[0], 409)
+        self.assertEqual(read()[2]["snapshot"]["run_id"], second["run_id"])
