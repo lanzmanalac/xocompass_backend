@@ -1,8 +1,9 @@
-from pydantic import BaseModel, Field, ConfigDict, field_validator, EmailStr
+from pydantic import AwareDatetime, BaseModel, Field, ConfigDict, field_validator, EmailStr
 from typing import List, Optional, Literal, Any
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from uuid import UUID
+from services.forecast_publication_views import classify_risk as classify_risk
 
 # ════════════════════════════════════════════════════════════════════════════
 # PASSWORD POLICY CONSTANTS — defined at module top so all schemas
@@ -175,30 +176,6 @@ class ChartPoint(BaseModel):
     lowerCI: float
     upperCI: float
 
-def classify_risk(ci_gap: float) -> str:
-    """
-    Rule-based risk tier derived from CI gap.
-
-    Boundaries are cast to float() explicitly to guard against type coercion
-    issues when ci_gap originates from a numpy or SQLAlchemy Numeric column.
-
-    Thresholds:
-        Low      : ci_gap <= 4.0
-        Medium   : 4.0 < ci_gap <= 5.5
-        High     : 5.5 < ci_gap <= 6.5
-        Critical : ci_gap > 6.5
-    """
-    ci_gap = float(ci_gap)          # defensive cast — see ISO note above
-
-    if ci_gap <= float(4.0):
-        return "Low"
-    elif ci_gap <= float(5.5):
-        return "Medium"
-    elif ci_gap <= float(6.5):
-        return "High"
-    else:
-        return "Critical"
-
 class ForecastGraphPoint(BaseModel):
     date: datetime
     actual: Optional[float] = None
@@ -340,6 +317,38 @@ class ForecastOutlookResponse(BaseModel):
     highest_forecast_week_value: int
     forecasted_bookings_10w: int          # ← FIXED typo + correct field name
     critical_weeks: List[CriticalForecastWeek]   # all 12 forward weeks
+
+
+class PublicationSnapshot(BaseModel):
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    model_id: int
+    run_created_at: datetime
+    data_through: date
+    business_analytics: dict[str, BusinessAnalyticsResponse]
+    forecast_graph: ForecastGraphResponse
+    forecast_outlook: ForecastOutlookResponse
+    strategic_actions: StrategicActionsResponse
+
+
+class PublishedForecastResponse(BaseModel):
+    snapshot: PublicationSnapshot
+    published_at: AwareDatetime
+
+    @field_validator("snapshot")
+    @classmethod
+    def validate_analytics_coverage(cls, snapshot: PublicationSnapshot) -> PublicationSnapshot:
+        if "overall" not in snapshot.business_analytics:
+            raise ValueError("The published run must include overall analytics.")
+        if snapshot.run_created_at.utcoffset() is None:
+            raise ValueError("The published run timestamp must include a time zone.")
+        return snapshot
+
+
+class PublicationStatusResponse(BaseModel):
+    state: Literal["disabled", "ready", "pending", "published"]
+    published_at: datetime | None = None
+    data_through: date | None = None
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3: ADVANCED METRICS — extends existing AdvancedMetricsResponse

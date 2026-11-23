@@ -20,6 +20,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
+from core.config import MANILA_TIMEZONE
+
 load_dotenv()
 
 # ── Pipeline steps (treat as black boxes — do NOT modify these files) ──
@@ -84,8 +86,13 @@ def export_db_to_csv(csv_path: Path = EXPORT_CSV) -> str:
         # Distribute revenue evenly across expanded rows so sum is preserved
         per_row_rev = (weekly_rev / count) if weekly_rev else None
 
+        booking_date = r.record_date
+        if booking_date.utcoffset() is not None:
+            booking_date = booking_date.astimezone(MANILA_TIMEZONE)
+        date_text = booking_date.strftime("%Y-%m-%d")
+
         for _ in range(count):
-            row = {"Generation Date": r.record_date.strftime("%Y-%m-%d")}
+            row = {"Generation Date": date_text}
             if per_row_rev is not None:
                 row["Net Amount"] = round(per_row_rev, 4)
             rows.append(row)

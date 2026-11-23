@@ -28,7 +28,7 @@ from typing import Annotated, Iterable
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError
+from jose import ExpiredSignatureError, JWTError
 from sqlalchemy.orm import Session
 
 from core.security import TOKEN_TYPE_ACCESS, decode_token
@@ -110,7 +110,7 @@ def get_current_user(
     """
     Resolve the Bearer token to a live, active User row.
 
-    Failure modes (all → 401, identical message):
+    Failure modes (all → 401):
       - No Authorization header.
       - Header is malformed / wrong scheme.
       - JWT signature invalid.
@@ -119,11 +119,8 @@ def get_current_user(
       - User UUID in `sub` doesn't match any row.
       - User row exists but is_active=False.
 
-    Why all paths return the SAME 401:
-      Distinguishing "expired" from "deactivated" leaks state to attackers.
-      The frontend has its own logic ("on 401 from a non-/auth endpoint,
-      try refresh; if /auth/refresh also 401s, hard-logout"). It doesn't
-      need server-side hints.
+    A signed, expired token gets the token_expired response so the frontend
+    can try refresh. Other failures share a generic response.
 
     `auto_error=False` on oauth2_scheme means FastAPI doesn't raise on a
     missing header — we get None and raise our own consistent 401.
@@ -133,6 +130,8 @@ def get_current_user(
 
     try:
         payload = decode_token(token, expected_type=TOKEN_TYPE_ACCESS)
+    except ExpiredSignatureError:
+        raise
     except JWTError:
         raise _credentials_exception()
 

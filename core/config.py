@@ -9,13 +9,43 @@ Do NOT add notebook/Colab-only syntax here (e.g. `!pip install`).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 
 # ── Temporal parameters ──
-WEEKLY_RULE = "W-MON"  # Non-overlapping weekly buckets (Monday start)
+WEEKLY_RULE = "W-MON"  # Non-overlapping weekly buckets that end on Monday
 FORECAST_HORIZON = 16  # Weeks to forecast into the future
 TEST_RATIO = 0.20  # 20% chronological holdout for evaluation
-SYSTEM_DATE = pd.Timestamp("2025-12-29")  # Last allowable date in data
+MANILA_TIMEZONE = ZoneInfo("Asia/Manila")
+
+
+def current_booking_week_start() -> pd.Timestamp:
+    """Return the exclusive cutoff for completed booking weeks in Manila time."""
+    today = datetime.now(MANILA_TIMEZONE).date()
+    return pd.Timestamp(today).to_period(WEEKLY_RULE).start_time
+
+
+def parse_manila_timestamps(values: pd.Series) -> pd.Series:
+    """Parse CSV dates as Manila local time for date comparisons."""
+    dates = pd.to_datetime(values.astype("string"), format="mixed", dayfirst=False, errors="coerce")
+    if not pd.api.types.is_datetime64_any_dtype(dates):
+        raise ValueError("CSV dates must use a consistent timezone.")
+    if dates.dt.tz is not None:
+        dates = dates.dt.tz_convert(MANILA_TIMEZONE).dt.tz_localize(None)
+    return dates
+
+
+def find_booking_date_column(columns: Iterable[str]) -> str | None:
+    """Find a supported booking date header, preferring explicit names."""
+    headers = {
+        " ".join(name.casefold().replace("_", " ").split()): name
+        for name in columns
+    }
+    return headers.get("generation date") or headers.get("booking date") or headers.get("date")
+
 
 # ── Holiday Lead Search ──
 LEAD_SEARCH_MIN = 1
@@ -42,4 +72,4 @@ GRIDSEARCH_MAX_Q = 2  # Max non-seasonal MA order
 GRIDSEARCH_MAX_PP = 1  # Max seasonal AR order
 GRIDSEARCH_MAX_DD = 1  # Max seasonal differencing
 GRIDSEARCH_MAX_QQ = 1  # Max seasonal MA order
-GRIDSEARCH_STEPWISE = False 
+GRIDSEARCH_STEPWISE = False

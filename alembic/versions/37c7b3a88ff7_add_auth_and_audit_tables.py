@@ -25,9 +25,11 @@ audit_status_enum = PG_ENUM('SUCCESS', 'FAILURE', 'PENDING', name='audit_status'
 
 
 def upgrade() -> None:
+    # Superseded by 079d319f2170, which creates auth tables correctly on all
+    # dialects. This revision exists only to anchor the migration chain.
+    return
+
     # ── Step 1: Create ENUM types idempotently via raw DDL ───────────────────
-    # We use raw op.execute() because only raw SQL supports IF NOT EXISTS for
-    # CREATE TYPE in PostgreSQL. SQLAlchemy's ORM layer does not expose this.
     op.execute("""
         DO $$ BEGIN
             CREATE TYPE user_role AS ENUM ('ADMIN', 'ANALYST', 'VIEWER');
@@ -68,15 +70,19 @@ def upgrade() -> None:
 
     op.create_table(
         'invite_tokens',
-        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column('token', sa.String(255), nullable=False, unique=True),
+        sa.Column('id', UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column('token_hash', sa.String(64), nullable=False),
         sa.Column('email', sa.String(255), nullable=False),
-        sa.Column('role', user_role_enum, nullable=False),
-        sa.Column('created_by_id', sa.Integer(), sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True),
-        sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
-        sa.Column('used', sa.Boolean(), nullable=False, server_default='false'),
+        sa.Column('intended_role', user_role_enum, nullable=False),
+        sa.Column('created_by_user_id', UUID(as_uuid=True), sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('consumed_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('consumed_by_user_id', UUID(as_uuid=True), sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True),
     )
+    op.create_index('ix_invite_pending', 'invite_tokens', ['email', 'consumed_at'])
+    op.create_index('ix_invite_tokens_email', 'invite_tokens', ['email'])
+    op.create_index('ix_invite_tokens_token_hash', 'invite_tokens', ['token_hash'], unique=True)
 
     op.create_table(
         'audit_logs',
@@ -107,11 +113,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_table('global_settings')
-    op.drop_table('audit_logs')
-    op.drop_table('invite_tokens')
-    op.drop_table('refresh_tokens')
-    op.drop_table('users')
-    # Drop ENUMs after tables — CASCADE handles any leftover dependencies
-    op.execute("DROP TYPE IF EXISTS audit_status")
-    op.execute("DROP TYPE IF EXISTS user_role")
+    # upgrade() is a no-op, so nothing to undo.
+    return

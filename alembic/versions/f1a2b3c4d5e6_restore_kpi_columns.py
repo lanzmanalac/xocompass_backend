@@ -15,17 +15,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Re-add the 7 KPI columns that d8fb31cb8ab8 incorrectly dropped.
-    # These are written by orchestrator.py -> persist_to_neon() -> compute_snapshot_kpis()
-    # and read by GET /api/dashboard-stats/{model_id}.
-    # Using IF NOT EXISTS logic via try/except to make this idempotent
-    # in case some environments still have the columns.
-    op.add_column('sarimax_models', sa.Column('total_records', sa.Integer(), nullable=True))
-    op.add_column('sarimax_models', sa.Column('data_quality_pct', sa.Float(), nullable=True))
-    op.add_column('sarimax_models', sa.Column('revenue_total', sa.Float(), nullable=True))
-    op.add_column('sarimax_models', sa.Column('growth_rate', sa.Float(), nullable=True))
-    op.add_column('sarimax_models', sa.Column('expected_bookings', sa.Integer(), nullable=True))
-    op.add_column('sarimax_models', sa.Column('peak_travel_period', sa.String(100), nullable=True))
+    existing = {col['name'] for col in sa.inspect(op.get_bind()).get_columns('sarimax_models')}
+    to_add = [
+        ('total_records',      sa.Column('total_records', sa.Integer(), nullable=True)),
+        ('data_quality_pct',   sa.Column('data_quality_pct', sa.Float(), nullable=True)),
+        ('revenue_total',      sa.Column('revenue_total', sa.Float(), nullable=True)),
+        ('growth_rate',        sa.Column('growth_rate', sa.Float(), nullable=True)),
+        ('expected_bookings',  sa.Column('expected_bookings', sa.Integer(), nullable=True)),
+        ('peak_travel_period', sa.Column('peak_travel_period', sa.String(100), nullable=True)),
+    ]
+    for name, col in to_add:
+        if name not in existing:
+            op.add_column('sarimax_models', col)
 
 
 def downgrade() -> None:

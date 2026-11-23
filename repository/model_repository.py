@@ -1,5 +1,4 @@
 import io
-import joblib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import os
@@ -86,6 +85,8 @@ def fetch_dashboard_stats(model_id: int) -> dict | None:
         }
 
 def fetch_model_binary(model_id: int | None = None) -> tuple:
+    import joblib
+
     with SessionLocal() as session:
         if model_id:
             record = session.query(SarimaxModel).filter(
